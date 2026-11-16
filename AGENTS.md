@@ -27,7 +27,24 @@
 
 ## 命令
 
-Phase 1 建立骨架后补充。
+```bash
+pnpm install        # 安装依赖（精确版本，见 pnpm-lock.yaml）
+pnpm build          # 原生 TypeScript 7 编译到 dist/
+pnpm start          # 运行 dist/server.js（默认 3001）
+pnpm dev            # node --watch 直接运行 src/server.ts
+pnpm type-check     # tsc -p tsconfig.json
+```
+
+启停（Windows）：
+
+```bat
+start.bat           # 启动 dist/server.js，端口 3001
+stop.bat            # 停止并释放端口
+```
+
+- `start.bat` 依赖 `dist/server.js`，首次使用前需先 `pnpm build`。
+- 端口在 `scripts/dev.mjs` 单点定义，通过 `PORT` 环境变量下发给子进程。
+- 启动记录写入 `.run/dev.json`（已 gitignore）。`stop.bat` 会校验 pid 存活 + 端口归属，不符时**拒绝终止**。
 
 ## Agent skills
 
