@@ -98,8 +98,8 @@ function buildListQuery (db: Database, query: ProductListQuery) {
   return { ordered, idQuery }
 }
 
-/** 封面图：按 sort_order 升序、同序按 id 升序取第一张（D67）。 */
-async function selectCoverImages (
+/** 封面图：按 sort_order 升序、同序按 id 升序取第一张（D67）；列表与相关推荐共用。 */
+export async function selectCoverImages (
   db: Database,
   productIds: number[],
 ): Promise<Map<number, { path: string, alt: string }>> {
