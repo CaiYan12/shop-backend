@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { verifyProductImages } from '../src/db/verify-images.ts'
+import { BACKEND_ROOT, resolveFrontendPublicDir, verifyProductImages } from '../src/db/verify-images.ts'
 import { SEED_MANIFEST } from '../src/db/seed-data.ts'
 import type { SeedManifest, SeedProduct } from '../src/db/seed-manifest.ts'
 
@@ -220,7 +220,7 @@ test('相对路径从后端仓库根目录解析，与执行位置无关', async
   ]
 
   for (const result of results) {
-    assert.equal(result.code, 1)
+    // 只断言解析结果：该目录本就不存在，退出码无法区分「路径解析错误」与「目录缺失」。
     assert.ok(
       result.output.includes(expected),
       `输出应包含从仓库根解析出的 ${expected}，实际：${result.output}`,
@@ -231,9 +231,14 @@ test('相对路径从后端仓库根目录解析，与执行位置无关', async
 test('未设置 FRONTEND_PUBLIC_DIR 时默认指向同级前端仓库的 public', async () => {
   const expected = resolve(repoRoot, '..', 'shop-frontend', 'public')
 
-  const result = await runCli({ cwd: tmpdir() })
+  // 直接断言解析结果：同级前端目录是否存在取决于仓库布局（主检出里有、worktree 里没有），
+  // 用退出码间接断言会让这条测试随布局变化。
+  assert.equal(resolveFrontendPublicDir(undefined, BACKEND_ROOT), expected)
+  assert.equal(resolveFrontendPublicDir('', BACKEND_ROOT), expected, '空字符串回退到默认目录')
+  assert.equal(resolveFrontendPublicDir('   ', BACKEND_ROOT), expected, '空白回退到默认目录')
 
-  assert.equal(result.code, 1)
+  // 脚本必须报告同一个默认目录；不检查退出码，因为目录是否存在不影响解析结果。
+  const result = await runCli({ cwd: tmpdir() })
   assert.ok(
     result.output.includes(expected),
     `输出应包含默认目录 ${expected}，实际：${result.output}`,
