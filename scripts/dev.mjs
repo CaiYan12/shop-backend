@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * 启动 shop-backend 并记录进程归属，供 stop.mjs 校验。
- * 端口在本文件单点定义，并通过启动参数/环境变量强制下发给子进程，
+ * 端口以本文件的常量为准，通过环境变量强制下发给子进程（应用侧默认值见 src/config.ts 的 DEFAULT_PORT），
  * 保证「脚本探测的端口」与「应用实际监听的端口」不会漂移。
  */
 import { spawn, spawnSync } from 'node:child_process'
