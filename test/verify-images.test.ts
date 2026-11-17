@@ -197,13 +197,16 @@ async function makePublicDirFromManifest (manifest: SeedManifest): Promise<strin
 
 test('缺文件时脚本以非零码退出并指出缺哪张', async () => {
   const publicDir = await makePublicDirFromManifest(SEED_MANIFEST)
-  await rm(join(publicDir, 'images', 'products', 'aurora-headphones', '3.webp'))
+  const product = SEED_MANIFEST.products.find((candidate) => candidate.images.length >= 3)
+  assert.ok(product !== undefined, '种子清单应有至少 3 张图片的商品')
+  const missing = product.images[2]!
+  await rm(join(publicDir, missing.path))
 
   const result = await runCli({ cwd: repoRoot, publicDir })
 
   assert.equal(result.code, 1)
   assert.match(result.output, /图片文件不存在/)
-  assert.match(result.output, /aurora-headphones\/3\.webp/)
+  assert.ok(result.output.includes(missing.path), `输出应指出缺哪张：${missing.path}`)
 })
 
 test('相对路径从后端仓库根目录解析，与执行位置无关', async () => {

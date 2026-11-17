@@ -54,9 +54,42 @@ async function datasetSnapshot (): Promise<{ products: Record<string, unknown>[]
   }
 }
 
-test('种子导入 3 件占位商品，每件至少 4 张图片且路径符合约定', async () => {
+/** 素材清单（shop-frontend docs/assets/product-images.json）的 10 个 slug，按字母序。 */
+const CATALOG_SLUGS = [
+  'airpods-max',
+  'apple-earpods',
+  'apple-watch-series-8',
+  'dell-e2210f',
+  'huawei-watch',
+  'keychron-k8',
+  'logitech-g15',
+  'logitech-g613',
+  'sony-wh-1000xm3',
+  'sony-wh-ch500',
+]
+
+test('种子导入 10 件真实商品：四类齐全、每件至少 4 张图片且路径符合约定', async () => {
   const result = await seedDatabase(db)
-  assert.ok(SEED_MANIFEST.products.length >= 2 && SEED_MANIFEST.products.length <= 4, '占位商品应为 2–4 件')
+  assert.equal(SEED_MANIFEST.products.length, 10, '最终规模为 10 件（C26）')
+  assert.deepEqual(
+    SEED_MANIFEST.products.map((product) => product.slug).sort(),
+    CATALOG_SLUGS,
+    '商品 slug 取自素材清单',
+  )
+  assert.deepEqual(
+    SEED_MANIFEST.categories.map((category) => category.slug).sort(),
+    ['audio', 'displays', 'peripherals', 'wearables'],
+    '四个商品类型齐全',
+  )
+  const perCategory = new Map<string, number>()
+  for (const product of SEED_MANIFEST.products) {
+    perCategory.set(product.categorySlug, (perCategory.get(product.categorySlug) ?? 0) + 1)
+  }
+  assert.deepEqual(
+    [...perCategory.entries()].sort(),
+    [['audio', 4], ['displays', 1], ['peripherals', 3], ['wearables', 2]],
+    '四类分布为 audio 4 / peripherals 3 / displays 1 / wearables 2',
+  )
   assert.equal(result.products, SEED_MANIFEST.products.length)
 
   const [rows] = await pool.query<RowDataPacket[]>(
@@ -140,13 +173,14 @@ function manifestWithFirstImage (path: string): SeedManifest {
 
 test('详情图片路径规范化后必须仍在该商品目录内，拒绝 .. 与跨商品引用', () => {
   const slug = SEED_MANIFEST.products[0]!.slug
+  const otherSlug = SEED_MANIFEST.products[1]!.slug
 
   assert.doesNotThrow(() => validateManifest(manifestWithDetail(`/images/products/${slug}/2.webp`)))
 
   const rejected = [
-    `/images/products/${slug}/../pulse-earbuds/1.webp`,
+    `/images/products/${slug}/../${otherSlug}/1.webp`,
     `/images/products/${slug}/1.webp/../../1.webp`,
-    '/images/products/pulse-earbuds/1.webp',
+    `/images/products/${otherSlug}/1.webp`,
     `/images/products/${slug}/1.png`,
     `/images/products/${slug}/0.webp`,
     `/images/products/${slug}/1.webp/`,
