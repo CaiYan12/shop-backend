@@ -14,7 +14,9 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "node src/db/seed.ts",
-    "verify:images": "node src/db/verify-images.ts"
+    "verify:images": "node src/db/verify-images.ts",
+    "check:terms": "node scripts/check-terms.mjs",
+    "prepare": "node scripts/install-hooks.mjs"
   },
   "dependencies": {
     "@fastify/type-provider-typebox": "6.3.0",
