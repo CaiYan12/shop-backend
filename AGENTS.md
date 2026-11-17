@@ -15,6 +15,7 @@
 - 不把 `.env`、口令、token 写入仓库；只保留 `.env.example` 占位示例。
 - 文档与提交信息用中文；代码标识符保持实际大小写，不做归一化。
 - 未验证的结论不写成事实；事实、推论、建议分开写。
+- TypeBox 与 Fastify 的三条易踩行为（`default` 不生效、请求侧 `$ref` 不可用、`const` 默认被转 `enum`）见 `docs/typebox-notes.md`。
 
 ## 双仓库约定
 
@@ -51,7 +52,7 @@ stop.bat            # 停止并释放端口
 - `start.bat` 依赖 `dist/server.js`，首次使用前需先 `pnpm build`。
 - 首次部署顺序：`db:create` → `db:migrate` → `db:seed` → `verify:images`。
 - 新建 worktree 的准备工作（`.env` 由人手动复制、依赖单独安装、读 `node_modules` 的路径写法、`FRONTEND_PUBLIC_DIR` 的基准）见 `docs/worktree-setup.md`。
-- 提交前由 pre-commit hook 自动跑 `type-check` / `check:terms` / `test`；`pnpm install` 时经 `prepare` 安装。
+- 提交前由 pre-commit hook 自动跑 `type-check` / `check:terms` / `test` / `build`；`pnpm install` 时经 `prepare` 安装。
 - 应用侧默认端口在 `src/config.ts` 的 `DEFAULT_PORT`；`scripts/dev.mjs` 通过 `PORT` 环境变量下发，覆盖该默认值。
 - 启动记录写入 `.run/dev.json`（已 gitignore）。`stop.bat` 会校验 pid 存活 + 端口归属，不符时**拒绝终止**。
 - **依赖构建白名单**：pnpm 12 用 `pnpm-workspace.yaml` 的 `allowBuilds`（**映射形式** `'包名': true`）决定哪些依赖可以跑构建脚本。写在 `package.json` 的 `pnpm` 字段**不生效**，写成列表会报 `expected mapping start`。本仓库用它放行 `esbuild`（`drizzle-kit` 的传递依赖）。

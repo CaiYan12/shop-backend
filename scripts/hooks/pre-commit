@@ -9,4 +9,6 @@ echo "[pre-commit] check:terms"
 pnpm check:terms
 echo "[pre-commit] test"
 pnpm test
+echo "[pre-commit] build"
+pnpm build
 echo "[pre-commit] ok"
