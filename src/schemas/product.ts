@@ -19,6 +19,17 @@ export const ProductCategory = Type.Object({
   name: Type.String(),
 }, { $id: 'ProductCategory' })
 
+/** 商品类型列表项（D67）：只返 slug 与 name，不返商品数量等未确认字段。 */
+export const CategoryListItem = Type.Object({
+  slug: Type.String(),
+  name: Type.String(),
+}, { $id: 'CategoryListItem' })
+
+/** 商品类型响应（D58、D67）：非分页集合统一带 `items`。 */
+export const CategoriesResponse = Type.Object({
+  items: Type.Array(Type.Ref('CategoryListItem')),
+}, { $id: 'CategoriesResponse' })
+
 /**
  * 列表项字段集（D67）。详情在它之上追加字段，因此字段定义只写一份，
  * 由 `ProductListItem` 与 `ProductDetailResponse` 共用。
@@ -108,6 +119,8 @@ export const ProductSlugParams = Type.Object({
 export function registerProductSchemas (app: AppInstance): void {
   app.addSchema(ProductCoverImage)
   app.addSchema(ProductCategory)
+  app.addSchema(CategoryListItem)
+  app.addSchema(CategoriesResponse)
   app.addSchema(ProductListItem)
   app.addSchema(ProductListResponse)
   app.addSchema(ProductRecommendationsResponse)
