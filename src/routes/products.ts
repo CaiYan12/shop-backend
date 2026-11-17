@@ -206,7 +206,7 @@ function registerListRecommendationsRoute (app: AppInstance): void {
       summaries.map((summary) => [summary.productId, summary]),
     )
 
-    return candidates.map((candidate) => {
+    const items = candidates.map((candidate) => {
       const summary = summaryByProductId.get(candidate.productId)
       if (summary === undefined) {
         // D49 不变量：每件商品至少有一个有效规格组合；缺摘要说明数据完整性被破坏。
@@ -232,6 +232,8 @@ function registerListRecommendationsRoute (app: AppInstance): void {
         coverImage,
       }
     })
+
+    return { items }
   })
 }
 

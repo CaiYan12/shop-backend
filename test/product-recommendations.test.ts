@@ -49,7 +49,7 @@ interface ErrorBody {
   }
 }
 
-type RecommendationsBody = ListItem[] & ErrorBody
+type RecommendationsBody = { items: ListItem[] } & ErrorBody
 
 async function recommendations (slug: string): Promise<{
   status: number
@@ -128,11 +128,11 @@ test('返回恰好 4 件，排除当前商品且无重复，字段与列表项�
 
   const { status, body } = await recommendations('apple-earpods')
   assert.equal(status, 200)
-  assert.equal(body.length, 4)
-  assert.equal(body.some((item) => item.slug === 'apple-earpods'), false, '不含当前商品')
-  assert.equal(new Set(body.map((item) => item.slug)).size, 4, '结果无重复')
+  assert.equal(body.items.length, 4)
+  assert.equal(body.items.some((item) => item.slug === 'apple-earpods'), false, '不含当前商品')
+  assert.equal(new Set(body.items.map((item) => item.slug)).size, 4, '结果无重复')
 
-  for (const item of body) {
+  for (const item of body.items) {
     assert.deepEqual(item, listItems.get(item.slug), `${item.slug} 的字段应与列表项一致`)
   }
 })
@@ -140,13 +140,13 @@ test('返回恰好 4 件，排除当前商品且无重复，字段与列表项�
 test('同类优先，按销量降序，同类不足时从其他商品类型补足', async () => {
   const { status, body } = await recommendations('apple-earpods')
   assert.equal(status, 200)
-  assert.deepEqual(body.map((item) => item.slug), [
+  assert.deepEqual(body.items.map((item) => item.slug), [
     'sony-wh-1000xm3', // audio，销量 2140
     'sony-wh-ch500', // audio，销量 1870
     'airpods-max', // audio，销量 1280
     'apple-watch-series-8', // wearables，销量 1540，其他类型中最高
   ])
-  assert.deepEqual(body.map((item) => item.category.slug), [
+  assert.deepEqual(body.items.map((item) => item.category.slug), [
     'audio',
     'audio',
     'audio',
@@ -157,9 +157,9 @@ test('同类优先，按销量降序，同类不足时从其他商品类型补�
 test('售罄商品可以出现在相关推荐中', async () => {
   const { status, body } = await recommendations('asus-pa246q')
   assert.equal(status, 200)
-  assert.equal(body.length, 4)
+  assert.equal(body.items.length, 4)
 
-  const soldOut = body.find((item) => item.slug === 'dell-e2210f')
+  const soldOut = body.items.find((item) => item.slug === 'dell-e2210f')
   assert.ok(soldOut, '售罄商品应可入选')
   assert.equal(soldOut.soldOut, true)
   assert.equal(soldOut.displayPriceCents, 29900)
@@ -175,7 +175,7 @@ test('同销量按 id 升序；同类商品销量更低时仍排在其他类型�
 
     const { status, body } = await recommendations('probe-current')
     assert.equal(status, 200)
-    assert.deepEqual(body.map((item) => item.slug), [
+    assert.deepEqual(body.items.map((item) => item.slug), [
       'probe-tie-first', // 同类，销量 500，id 更小
       'probe-tie-second', // 同类，销量 500，id 更大
       'apple-earpods', // 其他类型，销量 5620
