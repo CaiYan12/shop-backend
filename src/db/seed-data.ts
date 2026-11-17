@@ -83,9 +83,10 @@ export const SEED_MANIFEST: SeedManifest = {
         { name: '表盘', options: ['42mm', '46mm'] },
       ],
       variants: [
-        { sku: 'ORB-W3-SIL-42', option1Value: '硅胶', option2Value: '42mm', price: 1299, originalPrice: 1499, stock: 64 },
-        { sku: 'ORB-W3-SIL-46', option1Value: '硅胶', option2Value: '46mm', price: 1399, originalPrice: 1599, stock: 21 },
-        { sku: 'ORB-W3-WVN-42', option1Value: '编织', option2Value: '42mm', price: 1499, originalPrice: 1699, stock: 12 },
+        // 该商品全部组合库存为 0，用于演示售罄派生（D49）：展示价回退到全部有效组合最低价。
+        { sku: 'ORB-W3-SIL-42', option1Value: '硅胶', option2Value: '42mm', price: 1299, originalPrice: 1499, stock: 0 },
+        { sku: 'ORB-W3-SIL-46', option1Value: '硅胶', option2Value: '46mm', price: 1399, originalPrice: 1599, stock: 0 },
+        { sku: 'ORB-W3-WVN-42', option1Value: '编织', option2Value: '42mm', price: 1499, originalPrice: 1699, stock: 0 },
         { sku: 'ORB-W3-WVN-46', option1Value: '编织', option2Value: '46mm', price: 1599, originalPrice: 1799, stock: 0 },
       ],
       detail: [
