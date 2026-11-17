@@ -110,6 +110,8 @@ function registerListProductsRoute (app: AppInstance): void {
       throw new AppError('SEARCH_NOT_AVAILABLE', '关键词搜索尚未接入。')
     }
 
+    // TypeBoxValidatorCompiler 只做 Convert + Check，不应用 schema 的 default，
+    // 所以这三处兜底不是死代码（见 docs/typebox-notes.md）。
     const sort: ProductListSort = query.sort ?? 'sales_desc'
     const page = query.page ?? 1
     const pageSize = query.pageSize ?? 8
