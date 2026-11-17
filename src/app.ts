@@ -95,6 +95,16 @@ export async function createApp ({
 
   // 文档插件必须先于业务路由注册，才能收集到路由 schema（D64）。
   await app.register(swagger, {
+    // OpenAPI 3.1 原生支持 `const`；插件默认会把它改写成单值 `enum`，
+    // 购买校验三分支的判别字段因此失去 JSON Schema 语义（D64、V16）。
+    convertConstToEnum: false,
+    // 组件名取 schema 的 `$id`（如 `ProductListItem`），
+    // 避免 `def-0` 这类序号名进入契约；没有 `$id` 的 schema 仍退回序号名。
+    refResolver: {
+      buildLocalReference (json, _baseUri, _fragment, i) {
+        return typeof json.$id === 'string' ? json.$id : `def-${i}`
+      },
+    },
     openapi: {
       openapi: '3.1.0',
       info: {
