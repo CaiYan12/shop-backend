@@ -11,6 +11,9 @@ importers:
       '@fastify/type-provider-typebox':
         specifier: 6.3.0
         version: 6.3.0(ajv-formats@3.0.1)(typebox@1.4.7)
+      dotenv:
+        specifier: 18.0.10
+        version: 18.0.10
       drizzle-orm:
         specifier: 0.45.4
         version: 0.45.4(mysql2@3.24.6(@types/node@26.6.6))
@@ -680,6 +683,11 @@ packages:
     resolution: {integrity: sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA==}
     engines: {node: '>=6'}
 
+  dotenv@18.0.10:
+    resolution: {integrity: sha512-89FAA1xchzK2mxVWdr5F/0rldwiueXs6zJM86rO66EzekR1iBdiXRthyG+m5GvkJaFH3C2LESzamTkgndmLT2A==}
+    engines: {node: '>=12'}
+    hasBin: true
+
   drizzle-kit@0.31.11:
     resolution: {integrity: sha512-YCYqxTLIB2OCqf6w9/Vef13baBVbwQIPcbT4Y56AfO6B9ajZhDhD8Jkveg/hJvT/iuMloKD/IYYkyMMNhr7Kqg==}
     hasBin: true
@@ -1334,6 +1342,8 @@ snapshots:
   cookie@2.0.2: {}
 
   dequal@2.0.3: {}
+
+  dotenv@18.0.10: {}
 
   drizzle-kit@0.31.11:
     dependencies:

@@ -2,6 +2,7 @@ import Fastify from 'fastify'
 import { TypeBoxValidatorCompiler } from '@fastify/type-provider-typebox'
 import type { TypeBoxTypeProvider } from '@fastify/type-provider-typebox'
 import { Type } from 'typebox'
+import { describeConfig, loadConfig } from './config.ts'
 
 /**
  * Phase 1 的 V7 夹具：验证 TypeBox 1.x + provider 6 的类型推导与运行时校验。
@@ -53,7 +54,9 @@ app.get('/api/products', {
   }
 })
 
-// 端口由 scripts/dev.mjs 通过 PORT 环境变量下发；直接运行时回退到 3001。
-const port = Number(process.env.PORT ?? 3001)
+// 配置优先级：进程环境变量 > .env > 程序默认（D53）。
+const config = loadConfig()
+app.log.info(`[config] ${describeConfig(config)}`)
 
-await app.listen({ port, host: '127.0.0.1' })
+const address = await app.listen({ port: config.port, host: '127.0.0.1' })
+app.log.info(`[server] 实际监听 ${address}`)
