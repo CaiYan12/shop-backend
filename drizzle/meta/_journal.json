@@ -8,6 +8,13 @@
       "when": 1794893424639,
       "tag": "0000_red_prima",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1794894807004,
+      "tag": "0001_cultured_reavers",
+      "breakpoints": true
     }
   ]
 }
