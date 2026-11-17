@@ -99,6 +99,12 @@ const EXPECTED_SUMMARIES: Record<string, { displayPrice: number, displayOriginal
   'dell-e2210f': { displayPrice: 299, displayOriginalPrice: 399, soldOut: true },
   'apple-watch-series-8': { displayPrice: 2999, displayOriginalPrice: 3199, soldOut: false },
   'huawei-watch': { displayPrice: 1299, displayOriginalPrice: 1499, soldOut: false },
+  'dell-p2212h': { displayPrice: 699, displayOriginalPrice: 899, soldOut: false },
+  'asus-pa246q': { displayPrice: 999, displayOriginalPrice: 1299, soldOut: false },
+  'dell-s3423dwc': { displayPrice: 2799, displayOriginalPrice: 3299, soldOut: false },
+  'samsung-gear-s3': { displayPrice: 1499, displayOriginalPrice: 1799, soldOut: false },
+  'apple-watch-ultra': { displayPrice: 6199, displayOriginalPrice: 6699, soldOut: false },
+  'cherry-g80-3850': { displayPrice: 499, displayOriginalPrice: 599, soldOut: false },
 }
 
 test('种子数据逐件核对展示价、展示原价与售罄：至少一件售罄商品被正确识别', async () => {

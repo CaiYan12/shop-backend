@@ -19,7 +19,12 @@ export interface ImageProblem {
 }
 
 export interface ImageVerificationReport {
+  /** 校验的图片引用总数 = carousel + detail。 */
   checked: number
+  /** 轮播图引用数。 */
+  carousel: number
+  /** 详情块图片引用数。 */
+  detail: number
   problems: ImageProblem[]
 }
 
@@ -28,6 +33,8 @@ export interface ImageVerificationReport {
  */
 export function verifyProductImages ({ manifest, publicDir }: VerifyImagesOptions): ImageVerificationReport {
   let checked = 0
+  let carousel = 0
+  let detail = 0
   const problems: ImageProblem[] = []
 
   for (const product of manifest.products) {
@@ -70,18 +77,20 @@ export function verifyProductImages ({ manifest, publicDir }: VerifyImagesOption
     }
 
     for (const image of product.images) {
+      carousel += 1
       checkReference(image.path)
     }
 
     // 详情块里的图片引用同样要真实存在（D47）。
     for (const block of product.detail) {
       if (block.type === 'image') {
+        detail += 1
         checkReference(block.path)
       }
     }
   }
 
-  return { checked, problems }
+  return { checked, carousel, detail, problems }
 }
 
 /** 指定前端 public 目录的环境变量；相对值从基准目录解析，绝对值原样使用。 */
@@ -109,7 +118,9 @@ async function main (): Promise<void> {
     return
   }
 
-  console.log(`[verify-images] 通过：${report.checked} 处图片引用全部存在（公共目录 ${publicDir}）`)
+  console.log(
+    `[verify-images] 通过：${report.carousel} 张轮播 + ${report.detail} 处详情图引用（共 ${report.checked} 处）全部存在（公共目录 ${publicDir}）`,
+  )
 }
 
 await runIfMain(import.meta.url, main)

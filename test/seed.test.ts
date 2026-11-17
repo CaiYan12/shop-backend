@@ -55,23 +55,29 @@ async function datasetSnapshot (): Promise<{ products: Record<string, unknown>[]
   }
 }
 
-/** 素材清单（shop-frontend docs/assets/product-images.json）的 10 个 slug，按字母序。 */
+/** 素材清单（shop-frontend docs/assets/product-images.json）的 16 个 slug，按字母序。 */
 const CATALOG_SLUGS = [
   'airpods-max',
   'apple-earpods',
   'apple-watch-series-8',
+  'apple-watch-ultra',
+  'asus-pa246q',
+  'cherry-g80-3850',
   'dell-e2210f',
+  'dell-p2212h',
+  'dell-s3423dwc',
   'huawei-watch',
   'keychron-k8',
   'logitech-g15',
   'logitech-g613',
+  'samsung-gear-s3',
   'sony-wh-1000xm3',
   'sony-wh-ch500',
 ]
 
-test('种子导入 10 件真实商品：四类齐全、每件至少 4 张图片且路径符合约定', async () => {
+test('种子导入 16 件真实商品：四类齐全、每件至少 4 张图片且路径符合约定', async () => {
   const result = await seedDatabase(db)
-  assert.equal(SEED_MANIFEST.products.length, 10, '最终规模为 10 件（C26）')
+  assert.equal(SEED_MANIFEST.products.length, 16, '最终规模为 16 件')
   assert.deepEqual(
     SEED_MANIFEST.products.map((product) => product.slug).sort(),
     CATALOG_SLUGS,
@@ -88,8 +94,8 @@ test('种子导入 10 件真实商品：四类齐全、每件至少 4 张图片�
   }
   assert.deepEqual(
     [...perCategory.entries()].sort(),
-    [['audio', 4], ['displays', 1], ['peripherals', 3], ['wearables', 2]],
-    '四类分布为 audio 4 / peripherals 3 / displays 1 / wearables 2',
+    [['audio', 4], ['displays', 4], ['peripherals', 4], ['wearables', 4]],
+    '四类分布为 audio 4 / peripherals 4 / displays 4 / wearables 4',
   )
   assert.equal(result.products, SEED_MANIFEST.products.length)
 

@@ -1,8 +1,8 @@
 import type { SeedManifest } from './seed-manifest.ts'
 
 /**
- * 全量商品清单（T7）：10 件真实商品，逐件取自 shop-frontend 的素材清单
- * docs/assets/product-images.json（C26：audio 4 / peripherals 3 / displays 1 / wearables 2）。
+ * 全量商品清单（T7）：16 件真实商品，逐件取自 shop-frontend 的素材清单
+ * docs/assets/product-images.json（C26：audio 4 / peripherals 4 / displays 4 / wearables 4，共 72 张图片）。
  *
  * - 商品名、slug、品牌、型号与素材清单一致，图片路径与
  *   public/images/products/{slug}/1.webp…n.webp 一一对应，顺序即轮播顺序（D48）。
@@ -236,6 +236,38 @@ export const SEED_MANIFEST: SeedManifest = {
       ],
     },
     {
+      slug: 'cherry-g80-3850',
+      name: 'Cherry MX Board 3.0 机械键盘（G80-3850）',
+      categorySlug: 'peripherals',
+      brand: 'Cherry',
+      model: 'G80-3850',
+      rating: 4.6,
+      sales: 540,
+      dimensions: [
+        { name: '轴体', options: ['Cherry MX 红轴', 'Cherry MX 黑轴'] },
+        { name: '配列', options: ['US 104 键', 'UK 105 键'] },
+      ],
+      variants: [
+        { sku: 'G80-3850-RED-US', option1Value: 'Cherry MX 红轴', option2Value: 'US 104 键', price: 499, originalPrice: 599, stock: 20 },
+        { sku: 'G80-3850-RED-UK', option1Value: 'Cherry MX 红轴', option2Value: 'UK 105 键', price: 529, originalPrice: 629, stock: 8 },
+        { sku: 'G80-3850-BLK-US', option1Value: 'Cherry MX 黑轴', option2Value: 'US 104 键', price: 499, originalPrice: 599, stock: 6 },
+        // 黑轴 / UK 105 键缺货：组合存在、库存 0，用于演示「缺货」状态（C56）。
+        { sku: 'G80-3850-BLK-UK', option1Value: 'Cherry MX 黑轴', option2Value: 'UK 105 键', price: 529, originalPrice: 629, stock: 0 },
+      ],
+      detail: [
+        { type: 'text', text: '黑色机身配红色脚垫，背面铭牌标注 MX 3850 USB / G80-3850。' },
+        { type: 'image', path: '/images/products/cherry-g80-3850/4.webp', alt: 'Cherry MX Board 3.0 背面铭牌特写：MX 3850 USB / G80-3850' },
+        { type: 'text', text: '实拍为 UK 105 键配列；键帽可拆，Caps Lock 位置可见 MX 轴心。' },
+      ],
+      images: [
+        { path: '/images/products/cherry-g80-3850/1.webp', alt: 'Cherry MX Board 3.0 俯视全键盘，红色脚垫与 USB 线' },
+        { path: '/images/products/cherry-g80-3850/2.webp', alt: 'Cherry MX Board 3.0 左上角 3/4，Caps Lock 位置露出红轴' },
+        { path: '/images/products/cherry-g80-3850/3.webp', alt: 'Cherry MX Board 3.0 背面，红色脚垫与 CHERRY 压印' },
+        { path: '/images/products/cherry-g80-3850/4.webp', alt: 'Cherry MX Board 3.0 背面铭牌特写：MX 3850 USB / G80-3850' },
+        { path: '/images/products/cherry-g80-3850/5.webp', alt: 'Cherry MX Board 3.0 Caps Lock 键帽与轴心分解特写' },
+      ],
+    },
+    {
       slug: 'dell-e2210f',
       name: 'Dell E2210f 22 英寸液晶显示器',
       categorySlug: 'displays',
@@ -264,6 +296,96 @@ export const SEED_MANIFEST: SeedManifest = {
         { path: '/images/products/dell-e2210f/2.webp', alt: 'Dell E2210f 背面 3/4，支架与 VESA 安装板' },
         { path: '/images/products/dell-e2210f/3.webp', alt: 'Dell E2210f 底部接口特写：电源、VGA、DVI' },
         { path: '/images/products/dell-e2210f/4.webp', alt: 'Dell E2210f 正背面平视，铭牌与接口' },
+      ],
+    },
+    {
+      slug: 'dell-p2212h',
+      name: 'Dell Professional P2212H 22 英寸显示器',
+      categorySlug: 'displays',
+      brand: 'Dell',
+      model: 'P2212H',
+      rating: 4.5,
+      sales: 260,
+      dimensions: [
+        { name: '支架', options: ['原装升降底座', '第三方支架臂'] },
+        { name: '成色', options: ['全新', '官翻'] },
+      ],
+      variants: [
+        { sku: 'P2212H-BASE-NEW', option1Value: '原装升降底座', option2Value: '全新', price: 899, originalPrice: 1099, stock: 8 },
+        { sku: 'P2212H-BASE-REF', option1Value: '原装升降底座', option2Value: '官翻', price: 699, originalPrice: 899, stock: 12 },
+        { sku: 'P2212H-ARM-NEW', option1Value: '第三方支架臂', option2Value: '全新', price: 959, originalPrice: 1159, stock: 5 },
+        { sku: 'P2212H-ARM-REF', option1Value: '第三方支架臂', option2Value: '官翻', price: 759, originalPrice: 959, stock: 6 },
+      ],
+      detail: [
+        { type: 'text', text: '22 英寸液晶显示器，黑色机身配原装升降底座；背面带 VESA 安装板。' },
+        { type: 'image', path: '/images/products/dell-p2212h/3.webp', alt: 'Dell P2212H 背面 3/4，VESA 安装板' },
+        { type: 'text', text: '底部接口含电源、VGA、DVI 与 USB；可换装第三方支架臂。' },
+      ],
+      images: [
+        { path: '/images/products/dell-p2212h/1.webp', alt: 'Dell P2212H 正面 3/4，Dell 标志与底座' },
+        { path: '/images/products/dell-p2212h/2.webp', alt: 'Dell P2212H 背面，支架与线缆' },
+        { path: '/images/products/dell-p2212h/3.webp', alt: 'Dell P2212H 背面 3/4，VESA 安装板' },
+        { path: '/images/products/dell-p2212h/4.webp', alt: 'Dell P2212H 底部接口：电源、VGA、DVI、USB' },
+      ],
+    },
+    {
+      slug: 'asus-pa246q',
+      name: 'ASUS ProArt PA246Q 24 英寸专业显示器',
+      categorySlug: 'displays',
+      brand: 'ASUS',
+      model: 'PA246Q',
+      rating: 4.7,
+      sales: 340,
+      dimensions: [
+        { name: '支架', options: ['原装支架', '第三方支架臂'] },
+        { name: '成色', options: ['全新', '二手'] },
+      ],
+      variants: [
+        { sku: 'PA246Q-BASE-NEW', option1Value: '原装支架', option2Value: '全新', price: 1299, originalPrice: 1599, stock: 6 },
+        { sku: 'PA246Q-BASE-USED', option1Value: '原装支架', option2Value: '二手', price: 999, originalPrice: 1299, stock: 9 },
+        { sku: 'PA246Q-ARM-NEW', option1Value: '第三方支架臂', option2Value: '全新', price: 1359, originalPrice: 1659, stock: 4 },
+        { sku: 'PA246Q-ARM-USED', option1Value: '第三方支架臂', option2Value: '二手', price: 1059, originalPrice: 1359, stock: 5 },
+      ],
+      detail: [
+        { type: 'text', text: '24 英寸专业显示器，原装支架支持竖屏旋转；背面预留 VESA 孔位。' },
+        { type: 'image', path: '/images/products/asus-pa246q/4.webp', alt: 'ASUS ProArt PA246Q 竖屏旋转状态' },
+        { type: 'text', text: '侧面带 USB 集线器与接口；实拍为黑色机身配原装支架。' },
+      ],
+      images: [
+        { path: '/images/products/asus-pa246q/1.webp', alt: 'ASUS ProArt PA246Q 正面正视，屏幕与底座' },
+        { path: '/images/products/asus-pa246q/2.webp', alt: 'ASUS ProArt PA246Q 背面，VESA 孔位与铭牌' },
+        { path: '/images/products/asus-pa246q/3.webp', alt: 'ASUS ProArt PA246Q 侧面，USB 集线器与接口' },
+        { path: '/images/products/asus-pa246q/4.webp', alt: 'ASUS ProArt PA246Q 竖屏旋转状态' },
+      ],
+    },
+    {
+      slug: 'dell-s3423dwc',
+      name: 'Dell S3423DWC 34 英寸曲面显示器',
+      categorySlug: 'displays',
+      brand: 'Dell',
+      model: 'S3423DWC',
+      rating: 4.6,
+      sales: 180,
+      dimensions: [
+        { name: '支架', options: ['原装底座', '第三方支架臂'] },
+        { name: '成色', options: ['全新', '官翻'] },
+      ],
+      variants: [
+        { sku: 'S3423DWC-BASE-NEW', option1Value: '原装底座', option2Value: '全新', price: 3299, originalPrice: 3799, stock: 7 },
+        { sku: 'S3423DWC-BASE-REF', option1Value: '原装底座', option2Value: '官翻', price: 2799, originalPrice: 3299, stock: 9 },
+        { sku: 'S3423DWC-ARM-NEW', option1Value: '第三方支架臂', option2Value: '全新', price: 3359, originalPrice: 3859, stock: 4 },
+        { sku: 'S3423DWC-ARM-REF', option1Value: '第三方支架臂', option2Value: '官翻', price: 2859, originalPrice: 3359, stock: 3 },
+      ],
+      detail: [
+        { type: 'text', text: '34 英寸曲面显示器，极窄边框，黑色机身配银色底座。' },
+        { type: 'image', path: '/images/products/dell-s3423dwc/3.webp', alt: 'Dell S3423DWC 正面 3/4，曲面弧度' },
+        { type: 'text', text: '桌面场景实拍含摄像头与笔记本；可换装第三方支架臂。' },
+      ],
+      images: [
+        { path: '/images/products/dell-s3423dwc/1.webp', alt: 'Dell S3423DWC 正面，桌面场景与摄像头' },
+        { path: '/images/products/dell-s3423dwc/2.webp', alt: 'Dell S3423DWC 桌面全景，显示器与麦克风、笔记本' },
+        { path: '/images/products/dell-s3423dwc/3.webp', alt: 'Dell S3423DWC 正面 3/4，曲面弧度' },
+        { path: '/images/products/dell-s3423dwc/4.webp', alt: 'Dell S3423DWC 正面正视，极窄边框' },
       ],
     },
     {
@@ -325,6 +447,67 @@ export const SEED_MANIFEST: SeedManifest = {
         { path: '/images/products/huawei-watch/3.webp', alt: 'Huawei Watch 立于桌面正视' },
         { path: '/images/products/huawei-watch/4.webp', alt: 'Huawei Watch 正面 3/4，消息通知界面' },
         { path: '/images/products/huawei-watch/5.webp', alt: 'Huawei Watch 侧面，表体厚度与表冠' },
+      ],
+    },
+    {
+      slug: 'samsung-gear-s3',
+      name: 'Samsung Gear S3 Frontier 智能手表',
+      categorySlug: 'wearables',
+      brand: 'Samsung',
+      model: 'SM-R760',
+      rating: 4.5,
+      sales: 690,
+      dimensions: [
+        { name: '表带', options: ['橡胶', '真皮'] },
+        { name: '版本', options: ['蓝牙版', 'LTE 版'] },
+      ],
+      variants: [
+        { sku: 'GEARS3-RUB-BT', option1Value: '橡胶', option2Value: '蓝牙版', price: 1499, originalPrice: 1799, stock: 15 },
+        { sku: 'GEARS3-RUB-LTE', option1Value: '橡胶', option2Value: 'LTE 版', price: 1699, originalPrice: 1999, stock: 6 },
+        { sku: 'GEARS3-LEA-BT', option1Value: '真皮', option2Value: '蓝牙版', price: 1599, originalPrice: 1899, stock: 8 },
+        { sku: 'GEARS3-LEA-LTE', option1Value: '真皮', option2Value: 'LTE 版', price: 1799, originalPrice: 2099, stock: 4 },
+      ],
+      detail: [
+        { type: 'text', text: '圆形表壳配旋转表圈，背面为心率传感器与机型铭文。' },
+        { type: 'image', path: '/images/products/samsung-gear-s3/1.webp', alt: 'Samsung Gear S3 Frontier 背面，心率传感器与机型铭文' },
+        { type: 'text', text: '实拍为黑色 Frontier 配黑色橡胶表带；表带有橡胶与真皮两档，版本分蓝牙版与 LTE 版。' },
+      ],
+      images: [
+        { path: '/images/products/samsung-gear-s3/1.webp', alt: 'Samsung Gear S3 Frontier 背面，心率传感器与机型铭文' },
+        { path: '/images/products/samsung-gear-s3/2.webp', alt: 'Samsung Gear S3 Frontier 置于充电底座，表盘正面' },
+        { path: '/images/products/samsung-gear-s3/3.webp', alt: 'Samsung Gear S3 Frontier 佩戴状态，表盘正面' },
+        { path: '/images/products/samsung-gear-s3/4.webp', alt: 'Samsung Gear S3 Frontier 佩戴状态，心率监测界面' },
+        { path: '/images/products/samsung-gear-s3/5.webp', alt: 'Samsung Gear S3 Frontier 侧面，表体厚度与表冠' },
+      ],
+    },
+    {
+      slug: 'apple-watch-ultra',
+      name: 'Apple Watch Ultra 智能手表',
+      categorySlug: 'wearables',
+      brand: 'Apple',
+      model: 'A2626',
+      rating: 4.8,
+      sales: 1120,
+      dimensions: [
+        { name: '表带', options: ['海洋表带', '越野回环'] },
+        { name: '表带尺寸', options: ['S/M', 'M/L'] },
+      ],
+      variants: [
+        { sku: 'AWU-OCEAN-SM', option1Value: '海洋表带', option2Value: 'S/M', price: 6299, originalPrice: 6799, stock: 6 },
+        { sku: 'AWU-OCEAN-ML', option1Value: '海洋表带', option2Value: 'M/L', price: 6299, originalPrice: 6799, stock: 5 },
+        { sku: 'AWU-TRAIL-SM', option1Value: '越野回环', option2Value: 'S/M', price: 6199, originalPrice: 6699, stock: 4 },
+        { sku: 'AWU-TRAIL-ML', option1Value: '越野回环', option2Value: 'M/L', price: 6199, originalPrice: 6699, stock: 7 },
+      ],
+      detail: [
+        { type: 'text', text: '49mm 钛金属表壳，侧面为数码表冠与橙色操作按钮。' },
+        { type: 'image', path: '/images/products/apple-watch-ultra/4.webp', alt: 'Apple Watch Ultra 另一侧，橙色操作按钮与扬声器' },
+        { type: 'text', text: '背面集成传感器与钛金属铭文；实拍为白色海洋表带。' },
+      ],
+      images: [
+        { path: '/images/products/apple-watch-ultra/1.webp', alt: 'Apple Watch Ultra 佩戴状态，运动界面' },
+        { path: '/images/products/apple-watch-ultra/2.webp', alt: 'Apple Watch Ultra 侧面，数码表冠与侧键' },
+        { path: '/images/products/apple-watch-ultra/3.webp', alt: 'Apple Watch Ultra 背面，传感器与钛金属铭文' },
+        { path: '/images/products/apple-watch-ultra/4.webp', alt: 'Apple Watch Ultra 另一侧，橙色操作按钮与扬声器' },
       ],
     },
   ],

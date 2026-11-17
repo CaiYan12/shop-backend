@@ -71,6 +71,8 @@ test('图片全部存在时校验通过', async () => {
 
   assert.deepEqual(report.problems, [])
   assert.equal(report.checked, 2)
+  assert.equal(report.carousel, 2, '两张轮播图都应计入 carousel')
+  assert.equal(report.detail, 0, '没有详情图时 detail 为 0')
 })
 
 test('图片文件缺失时逐个报告问题，不静默跳过', async () => {
@@ -151,6 +153,8 @@ test('详情块引用的图片同样校验', async () => {
   const report = verifyProductImages({ manifest, publicDir })
 
   assert.equal(report.checked, 2)
+  assert.equal(report.carousel, 1, '轮播图与详情图分别计数')
+  assert.equal(report.detail, 1, '详情图引用计入 detail')
   assert.equal(report.problems.length, 1)
   assert.equal(report.problems[0]!.path, '/images/products/aurora-headphones/9.webp')
   assert.match(report.problems[0]!.message, /不存在/)
