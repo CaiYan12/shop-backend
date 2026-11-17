@@ -48,6 +48,11 @@ export const ProductListResponse = Type.Object({
   items: Type.Array(Type.Ref('ProductListItem')),
 }, { $id: 'ProductListResponse' })
 
+/** 相关推荐响应（D66）：最多 4 件，字段与列表项一致；非分页集合统一带 `items`。 */
+export const ProductRecommendationsResponse = Type.Object({
+  items: Type.Array(Type.Ref('ProductListItem')),
+}, { $id: 'ProductRecommendationsResponse' })
+
 /** 规格维度（D40）：保持商品声明的顺序，规格组合的选项值按此顺序解释。 */
 export const ProductDimension = Type.Object({
   name: Type.String(),
@@ -105,6 +110,7 @@ export function registerProductSchemas (app: AppInstance): void {
   app.addSchema(ProductCategory)
   app.addSchema(ProductListItem)
   app.addSchema(ProductListResponse)
+  app.addSchema(ProductRecommendationsResponse)
   app.addSchema(ProductDimension)
   app.addSchema(ProductVariant)
   app.addSchema(ProductDetailBlock)

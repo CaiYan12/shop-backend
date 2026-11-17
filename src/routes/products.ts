@@ -6,11 +6,15 @@ import {
   selectProductImages,
   selectProductVariants,
 } from '../db/product-detail.ts'
-import { selectProductListPage, type ProductListSort } from '../db/product-list.ts'
+import { selectCoverImages, selectProductListPage, type ProductListSort } from '../db/product-list.ts'
+import { selectProductRecommendations } from '../db/product-recommendations.ts'
 import { selectProductSummaries } from '../db/product-summary.ts'
 import { AppError } from '../errors.ts'
 import { yuanToCents } from '../money.ts'
 import { ProductSlugParams } from '../schemas/product.ts'
+
+/** 相关推荐固定取 4 件（D66）：同类优先，不足时从其他商品类型补足。 */
+const RECOMMENDATION_LIMIT = 4
 
 /** 列表查询参数（D61、D68）；未提供的筛选条件表示不限。 */
 const ListProductsQuery = Type.Object({
@@ -174,8 +178,68 @@ function registerGetProductRoute (app: AppInstance): void {
   })
 }
 
+/** 相关推荐路由（D58、D66）：最多 4 件，字段与列表项一致。 */
+function registerListRecommendationsRoute (app: AppInstance): void {
+  app.get('/api/products/:slug/recommendations', {
+    schema: {
+      operationId: 'listRecommendations',
+      tags: ['商品'],
+      params: ProductSlugParams,
+      response: {
+        200: Type.Ref('ProductRecommendationsResponse'),
+      },
+    },
+  }, async (request) => {
+    const { slug } = request.params
+
+    const candidates = await selectProductRecommendations(app.db, slug, RECOMMENDATION_LIMIT)
+    if (candidates === null) {
+      throw new AppError('PRODUCT_NOT_FOUND', '商品不存在。')
+    }
+
+    const productIds = candidates.map((candidate) => candidate.productId)
+    const [summaries, covers] = await Promise.all([
+      selectProductSummaries(app.db, { productIds }),
+      selectCoverImages(app.db, productIds),
+    ])
+    const summaryByProductId = new Map(
+      summaries.map((summary) => [summary.productId, summary]),
+    )
+
+    const items = candidates.map((candidate) => {
+      const summary = summaryByProductId.get(candidate.productId)
+      if (summary === undefined) {
+        // D49 不变量：每件商品至少有一个有效规格组合；缺摘要说明数据完整性被破坏。
+        throw new Error(`商品 ${candidate.slug} 缺少规格组合摘要，相关推荐无法渲染。`)
+      }
+      const coverImage = covers.get(candidate.productId)
+      if (coverImage === undefined) {
+        // D67：封面图必填，无图属数据完整性异常。
+        throw new Error(`商品 ${candidate.slug} 缺少封面图，相关推荐无法渲染。`)
+      }
+
+      return {
+        slug: candidate.slug,
+        name: candidate.name,
+        brand: candidate.brand,
+        model: candidate.model,
+        category: { slug: candidate.categorySlug, name: candidate.categoryName },
+        displayPriceCents: yuanToCents(summary.displayPrice),
+        displayOriginalPriceCents: yuanToCents(summary.displayOriginalPrice),
+        soldOut: summary.soldOut,
+        rating: candidate.rating,
+        sales: candidate.sales,
+        coverImage,
+      }
+    })
+
+    return { items }
+  })
+}
+
 /** 商品路由（D58）：挂载在应用工厂内、文档插件之后。 */
 export function registerProductRoutes (app: AppInstance): void {
   registerListProductsRoute(app)
   registerGetProductRoute(app)
+  registerListRecommendationsRoute(app)
 }
