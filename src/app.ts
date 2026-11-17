@@ -9,6 +9,7 @@ import type { AppConfig } from './config.ts'
 import type { Database } from './db/client.ts'
 import { AppError, ERROR_STATUS, errorEnvelope, type ErrorDetail } from './errors.ts'
 import { registerProductRoutes } from './routes/products.ts'
+import { registerProductSchemas } from './schemas/product.ts'
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -107,6 +108,9 @@ export async function createApp ({
     },
   })
   await app.register(swaggerUi, { routePrefix: '/documentation' })
+
+  // 共享响应 schema 只注册一次，路由通过 `$ref` 引用（D64、D67）。
+  registerProductSchemas(app)
 
   // 业务路由必须在文档插件之后挂载，才能被收集进契约（D64）。
   registerProductRoutes(app)

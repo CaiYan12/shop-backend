@@ -1,9 +1,16 @@
 import type { FastifyRequest } from 'fastify'
 import { Type } from 'typebox'
 import type { AppInstance } from '../app.ts'
+import {
+  selectProductDetail,
+  selectProductImages,
+  selectProductVariants,
+} from '../db/product-detail.ts'
 import { selectProductListPage, type ProductListSort } from '../db/product-list.ts'
+import { selectProductSummaries } from '../db/product-summary.ts'
 import { AppError } from '../errors.ts'
 import { yuanToCents } from '../money.ts'
+import { ProductSlugParams } from '../schemas/product.ts'
 
 /** 列表查询参数（D61、D68）；未提供的筛选条件表示不限。 */
 const ListProductsQuery = Type.Object({
@@ -21,39 +28,6 @@ const ListProductsQuery = Type.Object({
   pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, default: 8 })),
 })
 
-/** 列表项字段集（D67）：金额一律整数分，封面图必填。 */
-const ProductCoverImage = Type.Object({
-  path: Type.String(),
-  alt: Type.String(),
-}, { $id: 'ProductCoverImage' })
-
-const ProductCategory = Type.Object({
-  slug: Type.String(),
-  name: Type.String(),
-}, { $id: 'ProductCategory' })
-
-const ProductListItem = Type.Object({
-  slug: Type.String(),
-  name: Type.String(),
-  brand: Type.String(),
-  model: Type.String(),
-  category: Type.Ref('ProductCategory'),
-  displayPriceCents: Type.Integer(),
-  displayOriginalPriceCents: Type.Integer(),
-  soldOut: Type.Boolean(),
-  rating: Type.Number(),
-  sales: Type.Integer(),
-  coverImage: Type.Ref('ProductCoverImage'),
-}, { $id: 'ProductListItem' })
-
-const ProductListResponse = Type.Object({
-  page: Type.Integer(),
-  pageSize: Type.Integer(),
-  total: Type.Integer(),
-  totalPages: Type.Integer(),
-  items: Type.Array(Type.Ref('ProductListItem')),
-}, { $id: 'ProductListResponse' })
-
 /** 关键词先 trim（D69）：空白串按无关键词处理，长度校验作用在 trim 之后。 */
 async function trimKeyword (request: FastifyRequest): Promise<void> {
   const query = request.query as { keyword?: string }
@@ -63,12 +37,7 @@ async function trimKeyword (request: FastifyRequest): Promise<void> {
 }
 
 /** 商品列表路由（D58）：挂载在应用工厂内、文档插件之后。 */
-export function registerProductRoutes (app: AppInstance): void {
-  app.addSchema(ProductCoverImage)
-  app.addSchema(ProductCategory)
-  app.addSchema(ProductListItem)
-  app.addSchema(ProductListResponse)
-
+function registerListProductsRoute (app: AppInstance): void {
   app.get('/api/products', {
     schema: {
       operationId: 'listProducts',
@@ -135,4 +104,78 @@ export function registerProductRoutes (app: AppInstance): void {
       items,
     }
   })
+}
+
+/**
+ * 商品详情路由（D58）：一次返回详情页所需的全部数据。
+ * 展示价、展示原价与售罄状态复用列表的派生查询（D49），不重写规则。
+ */
+function registerGetProductRoute (app: AppInstance): void {
+  app.get('/api/products/:slug', {
+    schema: {
+      operationId: 'getProduct',
+      tags: ['商品'],
+      params: ProductSlugParams,
+      response: {
+        200: Type.Ref('ProductDetailResponse'),
+      },
+    },
+  }, async (request) => {
+    const { slug } = request.params
+
+    const product = await selectProductDetail(app.db, slug)
+    if (product === null) {
+      throw new AppError('PRODUCT_NOT_FOUND', '商品不存在。')
+    }
+
+    const [summary] = await selectProductSummaries(app.db, { productIds: [product.productId] })
+    if (summary === undefined) {
+      // D49 不变量：每件商品至少有一个有效规格组合；缺摘要说明数据完整性被破坏。
+      throw new Error(`商品 ${product.slug} 缺少规格组合摘要，详情无法渲染。`)
+    }
+
+    const [images, variants] = await Promise.all([
+      selectProductImages(app.db, product.productId),
+      selectProductVariants(app.db, product.productId),
+    ])
+
+    const [coverImage] = images
+    if (coverImage === undefined) {
+      // D67：封面图必填，无图属数据完整性异常。
+      throw new Error(`商品 ${product.slug} 缺少封面图，详情无法渲染。`)
+    }
+
+    return {
+      slug: product.slug,
+      name: product.name,
+      brand: product.brand,
+      model: product.model,
+      category: { slug: product.categorySlug, name: product.categoryName },
+      displayPriceCents: yuanToCents(summary.displayPrice),
+      displayOriginalPriceCents: yuanToCents(summary.displayOriginalPrice),
+      soldOut: summary.soldOut,
+      rating: product.rating,
+      sales: product.sales,
+      coverImage,
+      // 商品级库存 = 全部有效规格组合库存之和（D67）。
+      stock: variants.reduce((total, variant) => total + variant.stock, 0),
+      images,
+      dimensions: product.dimensions,
+      variants: variants.map((variant) => ({
+        sku: variant.sku,
+        option1Value: variant.option1Value,
+        option2Value: variant.option2Value,
+        priceCents: yuanToCents(variant.price),
+        originalPriceCents: yuanToCents(variant.originalPrice),
+        stock: variant.stock,
+      })),
+      detail: product.detail,
+    }
+  })
+}
+
+/** 商品路由（D58）：挂载在应用工厂内、文档插件之后。 */
+export function registerProductRoutes (app: AppInstance): void {
+  registerListProductsRoute(app)
+  registerGetProductRoute(app)
 }
