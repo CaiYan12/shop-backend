@@ -8,6 +8,7 @@ import { Type } from 'typebox'
 import type { AppConfig } from './config.ts'
 import type { Database } from './db/client.ts'
 import { AppError, ERROR_STATUS, errorEnvelope, type ErrorDetail } from './errors.ts'
+import { registerCategoryRoutes } from './routes/categories.ts'
 import { registerProductRoutes } from './routes/products.ts'
 import { registerProductSchemas } from './schemas/product.ts'
 
@@ -114,6 +115,7 @@ export async function createApp ({
 
   // 业务路由必须在文档插件之后挂载，才能被收集进契约（D64）。
   registerProductRoutes(app)
+  registerCategoryRoutes(app)
 
   app.get('/openapi.json', {
     schema: { hide: true },
