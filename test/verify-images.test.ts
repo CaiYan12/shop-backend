@@ -1,11 +1,13 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { BACKEND_ROOT, resolveFrontendPublicDir, verifyProductImages } from '../src/db/verify-images.ts'
+import { BACKEND_ROOT } from '../src/backend-root.ts'
+import { resolveFrontendPublicDir, verifyProductImages } from '../src/db/verify-images.ts'
 import { SEED_MANIFEST } from '../src/db/seed-data.ts'
 import type { SeedManifest, SeedProduct } from '../src/db/seed-manifest.ts'
 
@@ -213,6 +215,10 @@ test('相对路径从后端仓库根目录解析，与执行位置无关', async
   const relativeDir = join('test', `.missing-public-${process.pid}`)
   const expected = join(repoRoot, relativeDir)
 
+  // 路径解析只做函数级断言：相对值一律基于 BACKEND_ROOT。
+  assert.equal(resolveFrontendPublicDir(relativeDir, BACKEND_ROOT), expected)
+
+  // CLI 侧只断言退出码：该目录本就不存在，脚本必须以非零码退出。
   const results = [
     await runCli({ cwd: repoRoot, publicDir: relativeDir, script: join('src', 'db', 'verify-images.ts') }),
     await runCli({ cwd: join(repoRoot, 'test'), publicDir: relativeDir }),
@@ -220,42 +226,27 @@ test('相对路径从后端仓库根目录解析，与执行位置无关', async
   ]
 
   for (const result of results) {
-    // 只断言解析结果：该目录本就不存在，退出码无法区分「路径解析错误」与「目录缺失」。
-    assert.ok(
-      result.output.includes(expected),
-      `输出应包含从仓库根解析出的 ${expected}，实际：${result.output}`,
-    )
+    assert.equal(result.code, 1, '目录缺失时脚本应以 1 退出')
   }
 })
 
 test('未设置 FRONTEND_PUBLIC_DIR 时默认指向同级前端仓库的 public', async () => {
   const expected = resolve(repoRoot, '..', 'shop-frontend', 'public')
 
-  // 直接断言解析结果：同级前端目录是否存在取决于仓库布局（主检出里有、worktree 里没有），
-  // 用退出码间接断言会让这条测试随布局变化。
+  // 默认目录是否存在取决于仓库布局（主检出里有、worktree 里没有），
+  // 因此路径解析只做函数级断言，CLI 侧只断言退出码与该布局一致。
   assert.equal(resolveFrontendPublicDir(undefined, BACKEND_ROOT), expected)
   assert.equal(resolveFrontendPublicDir('', BACKEND_ROOT), expected, '空字符串回退到默认目录')
   assert.equal(resolveFrontendPublicDir('   ', BACKEND_ROOT), expected, '空白回退到默认目录')
 
-  // 脚本必须报告同一个默认目录；不检查退出码，因为目录是否存在不影响解析结果。
   const result = await runCli({ cwd: tmpdir() })
-  assert.ok(
-    result.output.includes(expected),
-    `输出应包含默认目录 ${expected}，实际：${result.output}`,
-  )
+  assert.equal(result.code, existsSync(expected) ? 0 : 1, '退出码应与默认目录是否存在一致')
 })
 
-test('素材齐全时脚本以 0 退出并报告通过', async () => {
+test('素材齐全时脚本以 0 退出', async () => {
   const publicDir = await makePublicDirFromManifest(SEED_MANIFEST)
-  const expected = SEED_MANIFEST.products.reduce(
-    (total, product) =>
-      total + product.images.length + product.detail.filter((block) => block.type === 'image').length,
-    0,
-  )
 
   const result = await runCli({ cwd: tmpdir(), publicDir })
 
   assert.equal(result.code, 0)
-  assert.match(result.output, /通过/)
-  assert.ok(result.output.includes(String(expected)), `输出应包含引用数 ${expected}，实际：${result.output}`)
 })

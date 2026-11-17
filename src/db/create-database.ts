@@ -1,6 +1,7 @@
 import { createConnection } from 'mysql2/promise'
 import type { RowDataPacket } from 'mysql2'
 import type { AppConfig } from '../config.ts'
+import { mysqlConnectionOptions } from './connection-options.ts'
 
 const DATABASE_NAME_PATTERN = /^[A-Za-z0-9_$]+$/
 
@@ -20,13 +21,7 @@ export async function createDatabase (
     throw new Error(`数据库名只允许字母、数字、下划线与 $：${name}`)
   }
 
-  const connection = await createConnection({
-    host: config.db.host,
-    port: config.db.port,
-    user: config.db.user,
-    password: config.db.password,
-    timezone: 'Z',
-  })
+  const connection = await createConnection(mysqlConnectionOptions(config.db))
 
   try {
     if (options.drop === true) {

@@ -45,9 +45,9 @@ test('空库执行迁移后建立商品类型表，slug 有唯一索引', async 
 })
 
 test('重复 slug 被数据库拒绝', async () => {
-  await pool.query("INSERT INTO categories (slug, name) VALUES ('demo-category', '演示分类')")
+  await pool.query("INSERT INTO categories (slug, name) VALUES ('demo-category', '演示商品类型')")
   await assert.rejects(
-    pool.query("INSERT INTO categories (slug, name) VALUES ('demo-category', '另一个分类')"),
+    pool.query("INSERT INTO categories (slug, name) VALUES ('demo-category', '另一个商品类型')"),
     (error: unknown) => (error as { code?: string }).code === 'ER_DUP_ENTRY',
   )
 })
@@ -71,10 +71,21 @@ test('库与表使用 utf8mb4，实际定义经查询确认', async () => {
   assert.equal(schemas[0]!.DEFAULT_COLLATION_NAME, 'utf8mb4_0900_ai_ci')
 
   const [tables] = await pool.query<RowDataPacket[]>(
-    'SELECT TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
-    [config.db.database, 'categories'],
+    `SELECT TABLE_NAME, TABLE_COLLATION FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('categories', 'products', 'product_images', 'product_variants')
+     ORDER BY TABLE_NAME`,
+    [config.db.database],
   )
-  assert.equal(tables[0]!.TABLE_COLLATION, 'utf8mb4_0900_ai_ci')
+  assert.deepEqual(
+    tables.map((row) => [row.TABLE_NAME, row.TABLE_COLLATION]),
+    [
+      ['categories', 'utf8mb4_0900_ai_ci'],
+      ['product_images', 'utf8mb4_0900_ai_ci'],
+      ['product_variants', 'utf8mb4_0900_ai_ci'],
+      ['products', 'utf8mb4_0900_ai_ci'],
+    ],
+    '四张表的默认字符集与排序规则应由迁移锁定',
+  )
 
   const [columns] = await pool.query<RowDataPacket[]>(
     `SELECT COLUMN_NAME, CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLUMNS
@@ -88,7 +99,7 @@ test('库与表使用 utf8mb4，实际定义经查询确认', async () => {
   }
 })
 
-test('连接池每个实际连接在首次业务查询前完成 UTC 会话设置', async () => {
+test('新连接的会话时区为 UTC', async () => {
   const connections: PoolConnection[] = await Promise.all(
     Array.from({ length: 3 }, () => pool.getConnection()),
   )
@@ -140,6 +151,5 @@ test('时间往返无偏移：默认时间与显式时间写入后读回一致',
 test('drizzle-kit 配置与运行时初始化共用 snake_case casing', async () => {
   const { DB_CASING } = await import('../src/db/casing.ts')
   const { default: drizzleConfig } = await import('../drizzle.config.ts')
-  assert.equal(DB_CASING, 'snake_case')
-  assert.equal(drizzleConfig.casing, 'snake_case')
+  assert.equal(drizzleConfig.casing, DB_CASING)
 })

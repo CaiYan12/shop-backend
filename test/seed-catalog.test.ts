@@ -116,6 +116,7 @@ test('售罄演示集中在 dell-e2210f：全部组合库存为 0，展示价回
   assert.ok(dell !== undefined)
   assert.equal(dell.soldOut, true, 'dell-e2210f 应标记售罄')
   assert.equal(dell.displayPrice, 299, '售罄时展示价取全部有效组合的最低价')
+  assert.equal(dell.displayOriginalPrice, 399, '展示原价应与展示价取自同一条组合（299 / 399）')
 
   const others = await selectProductSummaries(db, {
     slugs: manifestSlugs.filter((slug) => slug !== 'dell-e2210f'),

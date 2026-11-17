@@ -12,7 +12,7 @@ import {
 } from 'drizzle-orm/mysql-core'
 
 /**
- * 商品类型：单层分类（D45），slug 唯一且创建后保持稳定（D39）。
+ * 商品类型：本期为单层四类（D45），slug 唯一且创建后保持稳定（D39）。
  */
 export const categories = mysqlTable('categories', {
   id: int('id').autoincrement().primaryKey(),
@@ -65,6 +65,9 @@ export const productVariants = mysqlTable('product_variants', {
   id: int('id').autoincrement().primaryKey(),
   productId: int('product_id').notNull().references(() => products.id, { onDelete: 'cascade' }),
   sku: varchar('sku', { length: 64 }).notNull(),
+  // 两列使用 utf8mb4_0900_bin（按字符码值比较），由 drizzle/0002 的手写 ALTER 补上：
+  // drizzle-orm 0.45.4 的 mysql-core 列定义不支持逐列 collation。
+  // 改这两列必须同步补 collation，否则 db:generate 生成的 MODIFY COLUMN 会退回库默认的 _ai_ci。
   option1Value: varchar('option1_value', { length: 64 }).notNull(),
   option2Value: varchar('option2_value', { length: 64 }).notNull(),
   price: decimal('price', { precision: 10, scale: 2, mode: 'number' }).notNull(),
@@ -92,6 +95,7 @@ export const productImages = mysqlTable('product_images', {
   alt: varchar('alt', { length: 255 }).notNull(),
 }, (table) => [
   index('product_images_product_id_index').on(table.productId),
+  // 同一商品不允许两张同路径图：重复路径一定是清单写错，交给数据库拒绝（D48、D52）。
   uniqueIndex('product_images_product_id_path_unique').on(table.productId, table.path),
   check('product_images_sort_order_check', sql`${table.sortOrder} >= 0`),
 ])

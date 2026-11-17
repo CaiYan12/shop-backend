@@ -36,8 +36,9 @@ function normalizeRow (row: RowDataPacket): Record<string, unknown> {
 }
 
 async function datasetSnapshot (): Promise<{ products: Record<string, unknown>[], images: Record<string, unknown>[] }> {
+  // 时间列不参与幂等比较：updated_at 每次 upsert 都会变，另在幂等用例里单独断言它们已写入。
   const [productRows] = await pool.query<RowDataPacket[]>(
-    `SELECT id, slug, name, category_id, brand, model, rating, sales, detail, dimensions, created_at, updated_at
+    `SELECT id, slug, name, category_id, brand, model, rating, sales, detail, dimensions
      FROM products WHERE slug IN (?) ORDER BY slug`,
     [manifestSlugs],
   )
@@ -137,6 +138,16 @@ test('种子连续执行两次：数据集一致且无重复行', async () => {
 
   assert.deepEqual(second, first, '第二次执行后的数据集应与第一次完全一致')
 
+  const [timed] = await pool.query<RowDataPacket[]>(
+    'SELECT slug, created_at, updated_at FROM products WHERE slug IN (?) ORDER BY slug',
+    [manifestSlugs],
+  )
+  assert.equal(timed.length, SEED_MANIFEST.products.length)
+  for (const row of timed) {
+    assert.ok(row.created_at instanceof Date, `${String(row.slug)} 的 created_at 应已写入`)
+    assert.ok(row.updated_at instanceof Date, `${String(row.slug)} 的 updated_at 应已写入`)
+  }
+
   const expectedImages = SEED_MANIFEST.products.reduce((total, product) => total + product.images.length, 0)
   assert.equal(first.products.length, SEED_MANIFEST.products.length, '商品行数应等于清单件数')
   assert.equal(first.images.length, expectedImages, '图片行数应等于清单图片总数')
@@ -150,6 +161,45 @@ test('种子连续执行两次：数据集一致且无重复行', async () => {
     'SELECT product_id, path, COUNT(*) AS count FROM product_images GROUP BY product_id, path HAVING COUNT(*) > 1',
   )
   assert.deepEqual(duplicateImages, [], 'product_images 不应出现重复 (product_id, path)')
+})
+
+test('清单内改 sku 只更新该组合，不丢行', async () => {
+  const product = SEED_MANIFEST.products[0]!
+  const originalSku = product.variants[0]!.sku
+  const renamedSku = `${originalSku}-RENAMED`
+  const original: SeedManifest = { categories: SEED_MANIFEST.categories, products: [product] }
+  const renamed: SeedManifest = {
+    categories: SEED_MANIFEST.categories,
+    products: [{
+      ...product,
+      variants: product.variants.map((variant) =>
+        variant.sku === originalSku ? { ...variant, sku: renamedSku } : variant,
+      ),
+    }],
+  }
+
+  // 先按原清单导入，制造「库里已有旧 sku」的前提；否则全新库直接插入改名后的清单不会撞索引。
+  await seedDatabase(db, original)
+  try {
+    await seedDatabase(db, renamed)
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT v.sku FROM product_variants v JOIN products p ON p.id = v.product_id
+       WHERE p.slug = ? ORDER BY v.sku`,
+      [product.slug],
+    )
+    assert.equal(rows.length, product.variants.length, '改 sku 不应减少组合行数')
+    assert.deepEqual(
+      rows.map((row) => String(row.sku)),
+      product.variants
+        .map((variant) => (variant.sku === originalSku ? renamedSku : variant.sku))
+        .sort(),
+      '改 sku 后应保留全部组合，且被改的那条用新 sku',
+    )
+  } finally {
+    // 恢复原清单，避免影响后续用例。
+    await seedDatabase(db, original)
+  }
 })
 
 function manifestWithDetail (path: string): SeedManifest {
@@ -237,8 +287,8 @@ function renameProduct (product: SeedProduct, slug: string): SeedProduct {
   }
 }
 
-test('未出现在本次清单里的商品与分类保留，支持分批导入', async () => {
-  await pool.query("INSERT INTO categories (slug, name) VALUES ('legacy-cat', '历史分类')")
+test('未出现在本次清单里的商品与商品类型保留，支持分批导入', async () => {
+  await pool.query("INSERT INTO categories (slug, name) VALUES ('legacy-cat', '历史商品类型')")
   await pool.query(
     `INSERT INTO products (slug, name, category_id, brand, model, rating, sales, detail, dimensions)
      VALUES ('legacy-product', '历史商品', (SELECT id FROM categories WHERE slug = 'legacy-cat'),
@@ -262,7 +312,7 @@ test('未出现在本次清单里的商品与分类保留，支持分批导入',
   const [legacyCategories] = await pool.query<RowDataPacket[]>(
     "SELECT id FROM categories WHERE slug = 'legacy-cat'",
   )
-  assert.equal(legacyCategories.length, 1, '清单外的分类应保留')
+  assert.equal(legacyCategories.length, 1, '清单外的商品类型应保留')
 
   const [legacyProducts] = await pool.query<RowDataPacket[]>(
     "SELECT id FROM products WHERE slug = 'legacy-product'",
@@ -285,7 +335,7 @@ test('未出现在本次清单里的商品与分类保留，支持分批导入',
     'SELECT slug FROM categories WHERE slug = ?',
     [SEED_MANIFEST.categories[1]!.slug],
   )
-  assert.equal(otherCategories.length, 1, '未列入本批的分类应保留')
+  assert.equal(otherCategories.length, 1, '未列入本批的商品类型应保留')
 })
 
 test('普通导入使用单事务：中途失败不留下部分写入', async () => {
@@ -295,7 +345,7 @@ test('普通导入使用单事务：中途失败不留下部分写入', async ()
     categorySlug: 'tx-missing-category',
   }
   const manifest: SeedManifest = {
-    categories: [{ slug: 'tx-new-category', name: '事务测试分类' }],
+    categories: [{ slug: 'tx-new-category', name: '事务测试商品类型' }],
     products: [validProduct, brokenProduct],
   }
 
@@ -308,7 +358,7 @@ test('普通导入使用单事务：中途失败不留下部分写入', async ()
   const [categories] = await pool.query<RowDataPacket[]>(
     "SELECT id FROM categories WHERE slug = 'tx-new-category'",
   )
-  assert.equal(categories.length, 0, '事务回滚后不应留下新分类')
+  assert.equal(categories.length, 0, '事务回滚后不应留下新商品类型')
 
   const [products] = await pool.query<RowDataPacket[]>(
     "SELECT id FROM products WHERE slug IN ('tx-valid-product', 'tx-broken-product')",

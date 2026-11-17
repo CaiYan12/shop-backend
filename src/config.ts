@@ -1,5 +1,6 @@
 import { config as loadDotenv } from 'dotenv'
 import { resolve } from 'node:path'
+import { BACKEND_ROOT } from './backend-root.ts'
 
 /**
  * 配置的单一入口：迁移、种子、服务与测试都从这里读取同一份配置（D53）。
@@ -9,12 +10,9 @@ import { resolve } from 'node:path'
  */
 
 export const DEFAULT_PORT = 3001
-export const DEFAULT_DB_PORT = 3306
 
 /** 必须显式提供的配置项；DB_PASSWORD 允许为空（本地无口令账户）。 */
 export const REQUIRED_ENV_KEYS = ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_NAME'] as const
-
-export type RequiredEnvKey = (typeof REQUIRED_ENV_KEYS)[number]
 
 export class ConfigError extends Error {
   constructor (message: string) {
@@ -36,10 +34,16 @@ export interface AppConfig {
   port: number
 }
 
+/**
+ * 默认 .env 位置：仓库根，与 BACKEND_ROOT 同源。
+ * 不按 process.cwd() 解析，因此从任何工作目录启动都读到同一份 .env。
+ */
+const DEFAULT_ENV_FILE = resolve(BACKEND_ROOT, '.env')
+
 export interface LoadConfigOptions {
   /** 待填充的环境变量对象；默认 process.env。 */
   env?: NodeJS.ProcessEnv
-  /** .env 文件路径；默认从当前工作目录解析。 */
+  /** .env 文件路径；默认仓库根的 .env。 */
   envFile?: string
 }
 
@@ -78,7 +82,7 @@ export function readConfig (env: NodeJS.ProcessEnv = process.env): AppConfig {
 /** 读取 .env（不覆盖已有进程环境变量）后校验并返回配置。 */
 export function loadConfig (options: LoadConfigOptions = {}): AppConfig {
   const env = options.env ?? process.env
-  const envFile = options.envFile ?? resolve(process.cwd(), '.env')
+  const envFile = options.envFile ?? DEFAULT_ENV_FILE
   loadDotenv({ path: envFile, processEnv: env, quiet: true })
   return readConfig(env)
 }

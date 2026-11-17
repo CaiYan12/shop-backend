@@ -38,7 +38,7 @@ export interface SeedCategory {
   name: string
 }
 
-/** 一次导入的清单；未出现在清单里的商品与分类保留（D52）。 */
+/** 一次导入的清单；未出现在清单里的商品与商品类型保留（D52）。 */
 export interface SeedManifest {
   categories: SeedCategory[]
   products: SeedProduct[]
@@ -272,6 +272,10 @@ export function validateManifest (manifest: SeedManifest): void {
 
     if (typeof product.rating !== 'number' || !Number.isFinite(product.rating) || product.rating < 0 || product.rating > 5) {
       throw new SeedValidationError(`商品 ${product.slug} 的评分必须是 0–5 的数字`)
+    }
+    // decimal(2,1) 只保留一位小数；先拒绝多余精度，避免入库时被静默四舍五入。
+    if (Number(product.rating.toFixed(1)) !== product.rating) {
+      throw new SeedValidationError(`商品 ${product.slug} 的评分最多一位小数：${product.rating}`)
     }
     if (!Number.isInteger(product.sales) || product.sales < 0) {
       throw new SeedValidationError(`商品 ${product.slug} 的销量必须是非负整数`)

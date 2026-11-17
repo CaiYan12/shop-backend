@@ -43,7 +43,7 @@ stop.bat            # 停止并释放端口
 ```
 
 - `start.bat` 依赖 `dist/server.js`，首次使用前需先 `pnpm build`。
-- 端口在 `scripts/dev.mjs` 单点定义，通过 `PORT` 环境变量下发给子进程。
+- 应用侧默认端口在 `src/config.ts` 的 `DEFAULT_PORT`；`scripts/dev.mjs` 通过 `PORT` 环境变量下发，覆盖该默认值。
 - 启动记录写入 `.run/dev.json`（已 gitignore）。`stop.bat` 会校验 pid 存活 + 端口归属，不符时**拒绝终止**。
 - **依赖构建白名单**：pnpm 12 用 `pnpm-workspace.yaml` 的 `allowBuilds`（**映射形式** `'包名': true`）决定哪些依赖可以跑构建脚本。写在 `package.json` 的 `pnpm` 字段**不生效**，写成列表会报 `expected mapping start`。本仓库用它放行 `esbuild`（`drizzle-kit` 的传递依赖）。
 

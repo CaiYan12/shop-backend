@@ -1,6 +1,7 @@
 import { existsSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { BACKEND_ROOT } from '../backend-root.ts'
+import { runIfMain } from '../run-if-main.ts'
 import { SEED_MANIFEST } from './seed-data.ts'
 import { normalizeProductImagePath, productImageDirectory, type SeedManifest } from './seed-manifest.ts'
 
@@ -10,7 +11,7 @@ export interface VerifyImagesOptions {
   publicDir: string
 }
 
-/** 一张图片的校验问题；path 保留清单里的原始写法，便于定位。 */
+/** 一张图片的校验问题；path 通常是清单里的原始写法，目录缺失时为该商品的图片目录。 */
 export interface ImageProblem {
   slug: string
   path: string
@@ -87,12 +88,6 @@ export function verifyProductImages ({ manifest, publicDir }: VerifyImagesOption
 export const FRONTEND_PUBLIC_DIR_ENV = 'FRONTEND_PUBLIC_DIR'
 export const DEFAULT_FRONTEND_PUBLIC_DIR = '../shop-frontend/public'
 
-/**
- * 后端仓库根目录：本文件位于 <root>/src/db/（构建后为 <root>/dist/db/），上溯两级即根。
- * 相对路径一律从这里解析，因此脚本在任何工作目录下被调用都得到同一结果。
- */
-export const BACKEND_ROOT = fileURLToPath(new URL('../../', import.meta.url))
-
 export function resolveFrontendPublicDir (raw: string | undefined, baseDir: string): string {
   const value = raw?.trim()
   if (value === undefined || value === '') {
@@ -117,8 +112,4 @@ async function main (): Promise<void> {
   console.log(`[verify-images] 通过：${report.checked} 处图片引用全部存在（公共目录 ${publicDir}）`)
 }
 
-const entry = process.argv[1]
-if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
-  await main()
-}
-
+await runIfMain(import.meta.url, main)

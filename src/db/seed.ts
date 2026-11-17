@@ -1,6 +1,6 @@
 import { and, eq, notInArray } from 'drizzle-orm'
-import { pathToFileURL } from 'node:url'
 import { describeConfig, loadConfig } from '../config.ts'
+import { runIfMain } from '../run-if-main.ts'
 import { createDb, createPool, type Database } from './client.ts'
 import { SEED_MANIFEST } from './seed-data.ts'
 import { validateManifest, type SeedManifest } from './seed-manifest.ts'
@@ -17,7 +17,7 @@ export interface SeedResult {
  * 按稳定键导入种子数据（D52）：
  * - 商品类型、商品按 slug upsert，规格组合按 sku upsert，图片按商品整体替换；
  * - 本次清单中已移除的规格组合被删除（D52）；
- * - 未出现在本次清单里的商品与分类保持不动，因此支持分批导入；
+ * - 未出现在本次清单里的商品与商品类型保持不动，因此支持分批导入；
  * - 普通导入使用单事务，任一步失败整体回滚。
  */
 export async function seedDatabase (
@@ -108,6 +108,9 @@ export async function seedDatabase (
           .values(variantValues)
           .onDuplicateKeyUpdate({
             set: {
+              // 必须带上 sku：清单改 sku 而选项对不变时，INSERT 会撞上选项唯一索引，
+              // 若不更新 sku，随后的「删除清单外组合」会把这行删掉，组合静默消失。
+              sku: variantValues.sku,
               productId: variantValues.productId,
               option1Value: variantValues.option1Value,
               option2Value: variantValues.option2Value,
@@ -152,7 +155,4 @@ async function main (): Promise<void> {
   }
 }
 
-const entry = process.argv[1]
-if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
-  await main()
-}
+await runIfMain(import.meta.url, main)

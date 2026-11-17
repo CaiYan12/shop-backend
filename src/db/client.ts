@@ -4,6 +4,7 @@ import type { Pool } from 'mysql2/promise'
 import type { PoolConnection as CallbackPoolConnection } from 'mysql2'
 import type { AppConfig } from '../config.ts'
 import { DB_CASING } from './casing.ts'
+import { mysqlConnectionOptions } from './connection-options.ts'
 import * as schema from './schema.ts'
 
 /** 每个实际连接在首次业务查询前执行的会话设置：统一 UTC（D50）。 */
@@ -18,13 +19,9 @@ export const UTC_SESSION_SQL = "SET time_zone = '+00:00'"
  */
 export function createPool (config: AppConfig): Pool {
   const pool = createMysqlPool({
-    host: config.db.host,
-    port: config.db.port,
-    user: config.db.user,
-    password: config.db.password,
+    ...mysqlConnectionOptions(config.db),
     database: config.db.database,
     charset: 'UTF8MB4_0900_AI_CI',
-    timezone: 'Z',
     waitForConnections: true,
     connectionLimit: 10,
   })
