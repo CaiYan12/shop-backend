@@ -59,6 +59,24 @@ function validationDetails (error: ValidationFailure): ErrorDetail[] {
   }))
 }
 
+/**
+ * 框架层客户端错误的固定文案：请求体解析发生在 schema 校验之前，
+ * 畸形 JSON、错误 Content-Type 与超大请求体都不带 `validation`，
+ * 若不单独映射就会落进 500。业务码仍沿用 `VALIDATION_FAILED`（D62 不扩充）。
+ */
+const CLIENT_ERROR_MESSAGES: Record<number, string> = {
+  400: '请求体格式错误。',
+  413: '请求体过大。',
+  415: '不支持的 Content-Type。',
+}
+
+/** 框架错误携带的 4xx 状态码；非客户端错误返回 undefined。 */
+function clientErrorStatus (error: FastifyError): number | undefined {
+  const statusCode = error.statusCode
+  if (typeof statusCode !== 'number' || statusCode < 400 || statusCode >= 500) return undefined
+  return statusCode
+}
+
 function registerErrorHandler (app: AppInstance): void {
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof AppError) {
@@ -72,6 +90,16 @@ function registerErrorHandler (app: AppInstance): void {
       return reply
         .status(400)
         .send(errorEnvelope('VALIDATION_FAILED', '请求参数校验失败。', validationDetails(validationError)))
+    }
+
+    const clientStatus = clientErrorStatus(error)
+    if (clientStatus !== undefined) {
+      return reply
+        .status(clientStatus)
+        .send(errorEnvelope(
+          'VALIDATION_FAILED',
+          CLIENT_ERROR_MESSAGES[clientStatus] ?? '请求无法处理。',
+        ))
     }
 
     // 内部异常只返回通用消息，完整异常进服务端日志。

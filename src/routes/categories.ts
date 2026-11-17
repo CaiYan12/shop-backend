@@ -10,6 +10,7 @@ export function registerCategoryRoutes (app: AppInstance): void {
       tags: ['商品类型'],
       response: {
         200: Type.Ref('CategoriesResponse'),
+        500: Type.Ref('ErrorResponse'),
       },
     },
   }, async () => {

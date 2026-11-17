@@ -1,10 +1,16 @@
-import { and, asc, desc, eq, gte, inArray, sql, type SQL } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, lte, sql, type SQL } from 'drizzle-orm'
+import { priceCentsSql } from '../money.ts'
 import type { Database } from './client.ts'
 import { productSummaryQuery } from './product-summary.ts'
 import { categories, productImages, products } from './schema.ts'
 
-/** 列表排序（D61）：价格升序、价格降序、销量降序；同值一律按商品 id 升序。 */
-export type ProductListSort = 'price_asc' | 'price_desc' | 'sales_desc'
+/**
+ * 列表排序（D61）：价格升序、价格降序、销量降序；同值一律按商品 id 升序。
+ * 路由 schema 由这份常量生成，避免枚举值在两处各写一遍。
+ */
+export const PRODUCT_LIST_SORTS = ['price_asc', 'price_desc', 'sales_desc'] as const
+
+export type ProductListSort = (typeof PRODUCT_LIST_SORTS)[number]
 
 /** 列表查询条件；未提供的筛选条件表示不限。 */
 export interface ProductListQuery {
@@ -40,7 +46,7 @@ export interface ProductListPage {
 
 /**
  * 在派生查询外层组合筛选与排序（D61）：
- * 展示价以元存储，乘 100 后与整数分比较，DECIMAL 运算不引入浮点误差；
+ * 展示价以元存储，经 `priceCentsSql` 换算成整数分后再比较，DECIMAL 运算不引入浮点误差；
  * 排序在展示价或销量之后统一追加商品 id 升序，保证翻页稳定。
  */
 function buildListQuery (db: Database, query: ProductListQuery) {
@@ -51,10 +57,10 @@ function buildListQuery (db: Database, query: ProductListQuery) {
     conditions.push(eq(categories.slug, query.category))
   }
   if (query.priceMinCents !== undefined) {
-    conditions.push(sql`${summary.displayPrice} * 100 >= ${query.priceMinCents}`)
+    conditions.push(gte(priceCentsSql(summary.displayPrice), query.priceMinCents))
   }
   if (query.priceMaxCents !== undefined) {
-    conditions.push(sql`${summary.displayPrice} * 100 <= ${query.priceMaxCents}`)
+    conditions.push(lte(priceCentsSql(summary.displayPrice), query.priceMaxCents))
   }
   if (query.minSales !== undefined) {
     conditions.push(gte(products.sales, query.minSales))
@@ -88,14 +94,14 @@ function buildListQuery (db: Database, query: ProductListQuery) {
 
   // 计数用只含商品 id 的派生表：外层 select 的 slug / name 会与商品类型同名列重名，
   // 直接整体包成派生表会被 MySQL 拒绝（ER_DUP_FIELDNAME）。
-  const idQuery = db
+  const countSource = db
     .select({ productId: products.id })
     .from(products)
     .innerJoin(categories, eq(categories.id, products.categoryId))
     .innerJoin(summary, eq(summary.productId, products.id))
     .where(conditions.length === 0 ? undefined : and(...conditions))
 
-  return { ordered, idQuery }
+  return { ordered, countSource }
 }
 
 /** 封面图：按 sort_order 升序、同序按 id 升序取第一张（D67）；列表与相关推荐共用。 */
@@ -129,11 +135,11 @@ export async function selectProductListPage (
   db: Database,
   query: ProductListQuery,
 ): Promise<ProductListPage> {
-  const { ordered, idQuery } = buildListQuery(db, query)
+  const { ordered, countSource } = buildListQuery(db, query)
 
   const [countRow] = await db
     .select({ total: sql<number>`COUNT(*)`.mapWith(Number) })
-    .from(idQuery.as('filtered_products'))
+    .from(countSource.as('filtered_products'))
 
   const rows = await ordered
     .limit(query.pageSize)

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import type { Pool } from 'mysql2/promise'
 import { createApp, type AppInstance } from '../src/app.ts'
 import { createDb, createPool } from '../src/db/client.ts'
+import { ERROR_CODES } from '../src/errors.ts'
 import { OPENAPI_FILE, serializeOpenApiDocument } from '../src/openapi.ts'
 import { loadTestConfig } from './helpers/test-config.ts'
 
@@ -64,6 +65,7 @@ const BUSINESS_OPERATIONS: ReadonlyArray<readonly [string, string, string]> = [
 const COMPONENT_NAMES = [
   'CategoriesResponse',
   'CategoryListItem',
+  'ErrorResponse',
   'ProductCategory',
   'ProductCoverImage',
   'ProductDetailBlock',
@@ -77,6 +79,18 @@ const COMPONENT_NAMES = [
   'PurchaseCheckResponse',
   'PurchaseCheckVariant',
 ]
+
+/**
+ * 每个操作实际可能返回的错误响应（D62）：只声明运行时真会出现的状态码。
+ * 购买校验带请求体，因此额外声明请求体解析阶段的 413 / 415。
+ */
+const ERROR_RESPONSES: Readonly<Record<string, readonly string[]>> = {
+  listProducts: ['400', '500', '503'],
+  getProduct: ['400', '404', '500'],
+  listRecommendations: ['400', '404', '500'],
+  listCategories: ['500'],
+  checkPurchase: ['400', '404', '409', '413', '415', '500'],
+}
 
 function document (): OpenApiDocument {
   return app.swagger() as unknown as OpenApiDocument
@@ -153,6 +167,7 @@ test('响应 schema 引用命名组件：组件名取 $id，不出现 def-N', as
   const names = Object.keys(components)
 
   assert.deepEqual(names.slice().sort(), COMPONENT_NAMES, '组件应恰好是这些命名 schema')
+  assert.equal(names.length, COMPONENT_NAMES.length, '组件数量应与约定一致')
   assert.equal(names.some((name) => /^def-\d+$/.test(name)), false, '组件名不应是 def-N 序号')
 
   for (const [method, path] of BUSINESS_OPERATIONS) {
@@ -170,6 +185,48 @@ test('响应 schema 引用命名组件：组件名取 $id，不出现 def-N', as
     assert.match(ref, /^#\/components\/schemas\/[A-Z][A-Za-z]+$/, `引用 ${ref} 应指向命名组件`)
     assert.ok(Object.hasOwn(components, ref.slice('#/components/schemas/'.length)), `引用 ${ref} 应可解析`)
   }
+})
+
+test('每个操作声明实际可能返回的错误响应，统一引用 ErrorResponse', async () => {
+  const doc = document()
+
+  for (const [method, path, operationId] of BUSINESS_OPERATIONS) {
+    const responses = doc.paths?.[path]?.[method]?.responses ?? {}
+    const errorStatuses = Object.keys(responses).filter((status) => status !== '200').sort()
+
+    assert.deepEqual(
+      errorStatuses,
+      [...ERROR_RESPONSES[operationId]!].sort(),
+      `${operationId} 的错误响应状态码应与约定一致`,
+    )
+
+    for (const status of errorStatuses) {
+      const schema = responses[status]?.content?.['application/json']?.schema
+      assert.equal(
+        schema?.$ref,
+        '#/components/schemas/ErrorResponse',
+        `${operationId} 的 ${status} 响应应引用 ErrorResponse`,
+      )
+    }
+  }
+})
+
+test('ErrorResponse 组件：七个业务码枚举 + { path, message } 明细', async () => {
+  const response = schemas(document()).ErrorResponse
+  assert.ok(response !== undefined, 'ErrorResponse 应是命名组件')
+
+  const error = response.properties?.error
+  assert.ok(error !== undefined, 'ErrorResponse 应包含 error 对象')
+  assert.deepEqual(error.required?.slice().sort(), ['code', 'message'], 'code 与 message 必填')
+  assert.deepEqual(error.properties?.code?.enum, [...ERROR_CODES], 'code 应枚举七个业务码')
+  assert.equal(error.properties?.message?.type, 'string')
+
+  const details = error.properties?.details
+  assert.ok(details !== undefined, 'details 应为可选数组')
+  assert.equal(details.type, 'array')
+  assert.deepEqual(details.items?.required?.slice().sort(), ['message', 'path'], '明细元素固定 path 与 message')
+  assert.equal(details.items?.properties?.path?.type, 'string')
+  assert.equal(details.items?.properties?.message?.type, 'string')
 })
 
 test('购买校验三分支保留 anyOf + const，不出现单值 enum 与 nullable', async () => {
