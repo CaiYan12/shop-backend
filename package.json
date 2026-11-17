@@ -13,7 +13,8 @@
     "db:create": "node src/db/create-db.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:seed": "node src/db/seed.ts"
+    "db:seed": "node src/db/seed.ts",
+    "verify:images": "node src/db/verify-images.ts"
   },
   "dependencies": {
     "@fastify/type-provider-typebox": "6.3.0",

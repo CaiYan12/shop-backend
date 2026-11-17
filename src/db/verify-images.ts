@@ -1,0 +1,124 @@
+import { existsSync, statSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { SEED_MANIFEST } from './seed-data.ts'
+import { normalizeProductImagePath, productImageDirectory, type SeedManifest } from './seed-manifest.ts'
+
+/** 待校验的种子清单与前端 public 目录（绝对路径）。 */
+export interface VerifyImagesOptions {
+  manifest: SeedManifest
+  publicDir: string
+}
+
+/** 一张图片的校验问题；path 保留清单里的原始写法，便于定位。 */
+export interface ImageProblem {
+  slug: string
+  path: string
+  message: string
+}
+
+export interface ImageVerificationReport {
+  checked: number
+  problems: ImageProblem[]
+}
+
+/**
+ * 校验清单引用的图片：路径规范化后必须位于该商品目录内（D48），且文件真实存在。
+ */
+export function verifyProductImages ({ manifest, publicDir }: VerifyImagesOptions): ImageVerificationReport {
+  let checked = 0
+  const problems: ImageProblem[] = []
+
+  for (const product of manifest.products) {
+    const directory = join(publicDir, 'images', 'products', product.slug)
+    const directoryMissing = !(existsSync(directory) && statSync(directory).isDirectory())
+    if (directoryMissing) {
+      // 目录缺失时按商品报一次，避免把同一原因重复成「每张图片都不存在」。
+      problems.push({
+        slug: product.slug,
+        path: productImageDirectory(product.slug),
+        message: `商品图片目录不存在：${directory}`,
+      })
+    }
+
+    /** 校验一处图片引用：归属（D48）与文件存在性；失败只记录，不中断其余引用。 */
+    const checkReference = (rawPath: string): void => {
+      checked += 1
+      let normalized: string
+      try {
+        normalized = normalizeProductImagePath(rawPath, product.slug)
+      } catch (error) {
+        // 归属校验失败（含 ..、跨商品、非 n.webp）同样是一次失败。
+        problems.push({
+          slug: product.slug,
+          path: rawPath,
+          message: error instanceof Error ? error.message : String(error),
+        })
+        return
+      }
+      if (directoryMissing) {
+        return
+      }
+      if (!existsSync(join(publicDir, normalized))) {
+        problems.push({
+          slug: product.slug,
+          path: rawPath,
+          message: `图片文件不存在：${normalized}`,
+        })
+      }
+    }
+
+    for (const image of product.images) {
+      checkReference(image.path)
+    }
+
+    // 详情块里的图片引用同样要真实存在（D47）。
+    for (const block of product.detail) {
+      if (block.type === 'image') {
+        checkReference(block.path)
+      }
+    }
+  }
+
+  return { checked, problems }
+}
+
+/** 指定前端 public 目录的环境变量；相对值从基准目录解析，绝对值原样使用。 */
+export const FRONTEND_PUBLIC_DIR_ENV = 'FRONTEND_PUBLIC_DIR'
+export const DEFAULT_FRONTEND_PUBLIC_DIR = '../shop-frontend/public'
+
+/**
+ * 后端仓库根目录：本文件位于 <root>/src/db/（构建后为 <root>/dist/db/），上溯两级即根。
+ * 相对路径一律从这里解析，因此脚本在任何工作目录下被调用都得到同一结果。
+ */
+export const BACKEND_ROOT = fileURLToPath(new URL('../../', import.meta.url))
+
+export function resolveFrontendPublicDir (raw: string | undefined, baseDir: string): string {
+  const value = raw?.trim()
+  if (value === undefined || value === '') {
+    return resolve(baseDir, DEFAULT_FRONTEND_PUBLIC_DIR)
+  }
+  return resolve(baseDir, value)
+}
+
+async function main (): Promise<void> {
+  const publicDir = resolveFrontendPublicDir(process.env[FRONTEND_PUBLIC_DIR_ENV], BACKEND_ROOT)
+  const report = verifyProductImages({ manifest: SEED_MANIFEST, publicDir })
+
+  if (report.problems.length > 0) {
+    console.error(`[verify-images] 失败：${report.problems.length} 个问题（公共目录 ${publicDir}）`)
+    for (const problem of report.problems) {
+      console.error(`  - ${problem.slug} ${problem.path}：${problem.message}`)
+    }
+    process.exitCode = 1
+    return
+  }
+
+  console.log(`[verify-images] 通过：${report.checked} 处图片引用全部存在（公共目录 ${publicDir}）`)
+}
+
+const entry = process.argv[1]
+if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
+  await main()
+}
+
