@@ -1,11 +1,27 @@
 import { Type } from 'typebox'
 import type { AppInstance } from '../app.ts'
 import { SLUG_PATTERN } from '../db/seed-manifest.ts'
+import { ERROR_CODES } from '../errors.ts'
 
 /**
  * 商品相关的共享 schema（D67）：列表与详情都从这里引用，
  * 避免同一 `$id` 被两处各定义一份。
  */
+
+/**
+ * 统一错误信封（D62）：`code` 只允许七个业务码，`details` 元素固定为 `{ path, message }`。
+ * 路由的错误响应统一引用这个组件，契约里不再只有 200。
+ */
+export const ErrorResponse = Type.Object({
+  error: Type.Object({
+    code: Type.Enum(ERROR_CODES),
+    message: Type.String(),
+    details: Type.Optional(Type.Array(Type.Object({
+      path: Type.String(),
+      message: Type.String(),
+    }))),
+  }),
+}, { $id: 'ErrorResponse' })
 
 /** 封面图：列表卡片与详情轮播图同形，都是路径 + 替代文本。 */
 export const ProductCoverImage = Type.Object({
@@ -185,6 +201,7 @@ export const PurchaseCheckResponse = Type.Union([
  * 因此由应用工厂统一调用，路由模块只引用。
  */
 export function registerProductSchemas (app: AppInstance): void {
+  app.addSchema(ErrorResponse)
   app.addSchema(ProductCoverImage)
   app.addSchema(ProductCategory)
   app.addSchema(CategoryListItem)

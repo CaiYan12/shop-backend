@@ -2,44 +2,20 @@ import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ResultSetHeader, RowDataPacket } from 'mysql2'
 import type { Pool } from 'mysql2/promise'
-import { createApp, type AppInstance } from '../src/app.ts'
-import { createDb, createPool, type Database } from '../src/db/client.ts'
-import { runMigrations } from '../src/db/migrate.ts'
-import { seedDatabase } from '../src/db/seed.ts'
-import { loadTestConfig } from './helpers/test-config.ts'
+import type { AppInstance } from '../src/app.ts'
+import type { ErrorBody, ListItem } from './helpers/api-types.ts'
+import { closeSeededApp, createSeededApp } from './helpers/seeded-app.ts'
 
-const config = loadTestConfig()
 let pool: Pool
-let db: Database
 let app: AppInstance
 
 before(async () => {
-  pool = createPool(config)
-  db = createDb(pool)
-  await runMigrations(db)
-  await seedDatabase(db)
-  app = await createApp({ db, config })
-  await app.ready()
+  ({ pool, app } = await createSeededApp())
 })
 
 after(async () => {
-  await app.close()
-  await pool.end()
+  await closeSeededApp({ pool, app })
 })
-
-interface ListItem {
-  slug: string
-  name: string
-  brand: string
-  model: string
-  category: { slug: string, name: string }
-  displayPriceCents: number
-  displayOriginalPriceCents: number
-  soldOut: boolean
-  rating: number
-  sales: number
-  coverImage: { path: string, alt: string }
-}
 
 interface ListBody {
   page: number
@@ -47,14 +23,6 @@ interface ListBody {
   total: number
   totalPages: number
   items: ListItem[]
-}
-
-interface ErrorBody {
-  error: {
-    code: string
-    message: string
-    details?: Array<{ path: string, message: string }>
-  }
 }
 
 async function list (query: Record<string, string | number> = {}): Promise<{
@@ -366,6 +334,17 @@ test('筛选条件可组合：商品类型与最低销量同时生效', async ()
 test('价格下限大于上限返回 400 与 VALIDATION_FAILED，明细指向价格下限', async () => {
   const { status, body } = await list({ priceMinCents: 20000, priceMaxCents: 19999 })
   assert.equal(status, 400)
+  assert.equal(body.error.code, 'VALIDATION_FAILED')
+  assert.equal(body.error.details?.[0]?.path, 'querystring/priceMinCents')
+})
+
+test('请求校验先于服务不可用：跨字段价格错误与非法关键词同时出现时返回 400', async () => {
+  const { status, body } = await list({
+    keyword: '蓝牙',
+    priceMinCents: 20000,
+    priceMaxCents: 19999,
+  })
+  assert.equal(status, 400, '可修正的请求校验应排在 503 之前')
   assert.equal(body.error.code, 'VALIDATION_FAILED')
   assert.equal(body.error.details?.[0]?.path, 'querystring/priceMinCents')
 })

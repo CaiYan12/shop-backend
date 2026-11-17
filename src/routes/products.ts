@@ -6,7 +6,7 @@ import {
   selectProductImages,
   selectProductVariants,
 } from '../db/product-detail.ts'
-import { selectCoverImages, selectProductListPage, type ProductListSort } from '../db/product-list.ts'
+import { selectCoverImages, selectProductListPage, PRODUCT_LIST_SORTS, type ProductListSort } from '../db/product-list.ts'
 import { selectProductRecommendations } from '../db/product-recommendations.ts'
 import { selectProductSummaries } from '../db/product-summary.ts'
 import { AppError } from '../errors.ts'
@@ -23,11 +23,10 @@ const ListProductsQuery = Type.Object({
   priceMaxCents: Type.Optional(Type.Integer({ minimum: 0, maximum: 9_999_999_999 })),
   minSales: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000 })),
   keyword: Type.Optional(Type.String({ maxLength: 100 })),
-  sort: Type.Optional(Type.Union([
-    Type.Literal('price_asc'),
-    Type.Literal('price_desc'),
-    Type.Literal('sales_desc'),
-  ], { default: 'sales_desc' })),
+  sort: Type.Optional(Type.Union(
+    PRODUCT_LIST_SORTS.map((sort) => Type.Literal(sort)),
+    { default: 'sales_desc' },
+  )),
   page: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, default: 1 })),
   pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, default: 8 })),
 })
@@ -40,6 +39,46 @@ async function trimKeyword (request: FastifyRequest): Promise<void> {
   }
 }
 
+/** 列表项的商品字段（D67）：列表行与相关推荐候选都满足这一形状。 */
+interface ListItemProduct {
+  slug: string
+  name: string
+  brand: string
+  model: string
+  categorySlug: string
+  categoryName: string
+  rating: number
+  sales: number
+}
+
+/** 列表项的派生摘要（D49）：展示价、展示原价与售罄状态。 */
+interface ListItemSummary {
+  displayPrice: number
+  displayOriginalPrice: number
+  soldOut: boolean
+}
+
+/** 列表项 11 字段投影（D67）：列表与相关推荐共用，字段只写一份。 */
+function toListItem (
+  product: ListItemProduct,
+  summary: ListItemSummary,
+  coverImage: { path: string, alt: string },
+) {
+  return {
+    slug: product.slug,
+    name: product.name,
+    brand: product.brand,
+    model: product.model,
+    category: { slug: product.categorySlug, name: product.categoryName },
+    displayPriceCents: yuanToCents(summary.displayPrice),
+    displayOriginalPriceCents: yuanToCents(summary.displayOriginalPrice),
+    soldOut: summary.soldOut,
+    rating: product.rating,
+    sales: product.sales,
+    coverImage,
+  }
+}
+
 /** 商品列表路由（D58）：挂载在应用工厂内、文档插件之后。 */
 function registerListProductsRoute (app: AppInstance): void {
   app.get('/api/products', {
@@ -49,22 +88,26 @@ function registerListProductsRoute (app: AppInstance): void {
       querystring: ListProductsQuery,
       response: {
         200: Type.Ref('ProductListResponse'),
+        400: Type.Ref('ErrorResponse'),
+        500: Type.Ref('ErrorResponse'),
+        503: Type.Ref('ErrorResponse'),
       },
     },
     preValidation: trimKeyword,
   }, async (request) => {
     const query = request.query
 
-    // Phase 3 关键词搜索尚未接入（D69）：非空关键词明确返回 503。
-    if (query.keyword !== undefined && query.keyword !== '') {
-      throw new AppError('SEARCH_NOT_AVAILABLE', '关键词搜索尚未接入。')
-    }
-
+    // 请求校验（400）先于服务不可用（503）：两者同时不满足时，先报可修正的那个。
     const { priceMinCents, priceMaxCents } = query
     if (priceMinCents !== undefined && priceMaxCents !== undefined && priceMinCents > priceMaxCents) {
       throw new AppError('VALIDATION_FAILED', '价格下限不能大于价格上限。', [
         { path: 'querystring/priceMinCents', message: '价格下限不能大于价格上限。' },
       ])
+    }
+
+    // Phase 3 关键词搜索尚未接入（D69）：非空关键词明确返回 503。
+    if (query.keyword !== undefined && query.keyword !== '') {
+      throw new AppError('SEARCH_NOT_AVAILABLE', '关键词搜索尚未接入。')
     }
 
     const sort: ProductListSort = query.sort ?? 'sales_desc'
@@ -85,19 +128,7 @@ function registerListProductsRoute (app: AppInstance): void {
       if (row.coverImage === null) {
         throw new Error(`商品 ${row.slug} 缺少封面图，列表无法渲染。`)
       }
-      return {
-        slug: row.slug,
-        name: row.name,
-        brand: row.brand,
-        model: row.model,
-        category: { slug: row.categorySlug, name: row.categoryName },
-        displayPriceCents: yuanToCents(row.displayPrice),
-        displayOriginalPriceCents: yuanToCents(row.displayOriginalPrice),
-        soldOut: row.soldOut,
-        rating: row.rating,
-        sales: row.sales,
-        coverImage: row.coverImage,
-      }
+      return toListItem(row, row, row.coverImage)
     })
 
     return {
@@ -122,6 +153,9 @@ function registerGetProductRoute (app: AppInstance): void {
       params: ProductSlugParams,
       response: {
         200: Type.Ref('ProductDetailResponse'),
+        400: Type.Ref('ErrorResponse'),
+        404: Type.Ref('ErrorResponse'),
+        500: Type.Ref('ErrorResponse'),
       },
     },
   }, async (request) => {
@@ -187,6 +221,9 @@ function registerListRecommendationsRoute (app: AppInstance): void {
       params: ProductSlugParams,
       response: {
         200: Type.Ref('ProductRecommendationsResponse'),
+        400: Type.Ref('ErrorResponse'),
+        404: Type.Ref('ErrorResponse'),
+        500: Type.Ref('ErrorResponse'),
       },
     },
   }, async (request) => {
@@ -218,19 +255,7 @@ function registerListRecommendationsRoute (app: AppInstance): void {
         throw new Error(`商品 ${candidate.slug} 缺少封面图，相关推荐无法渲染。`)
       }
 
-      return {
-        slug: candidate.slug,
-        name: candidate.name,
-        brand: candidate.brand,
-        model: candidate.model,
-        category: { slug: candidate.categorySlug, name: candidate.categoryName },
-        displayPriceCents: yuanToCents(summary.displayPrice),
-        displayOriginalPriceCents: yuanToCents(summary.displayOriginalPrice),
-        soldOut: summary.soldOut,
-        rating: candidate.rating,
-        sales: candidate.sales,
-        coverImage,
-      }
+      return toListItem(candidate, summary, coverImage)
     })
 
     return { items }

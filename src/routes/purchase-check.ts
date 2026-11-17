@@ -17,6 +17,12 @@ export function registerPurchaseCheckRoutes (app: AppInstance): void {
       body: PurchaseCheckBody,
       response: {
         200: Type.Ref('PurchaseCheckResponse'),
+        400: Type.Ref('ErrorResponse'),
+        404: Type.Ref('ErrorResponse'),
+        409: Type.Ref('ErrorResponse'),
+        413: Type.Ref('ErrorResponse'),
+        415: Type.Ref('ErrorResponse'),
+        500: Type.Ref('ErrorResponse'),
       },
     },
   }, async (request) => {
@@ -41,7 +47,7 @@ export function registerPurchaseCheckRoutes (app: AppInstance): void {
     const subtotalCents = unitPriceCents * quantity
     const priceChanged = expectedUnitPriceCents !== undefined && expectedUnitPriceCents !== unitPriceCents
 
-    const common = {
+    const sharedResultFields = {
       product: { slug: product.slug, name: product.name },
       variant: {
         sku: variant.sku,
@@ -57,19 +63,19 @@ export function registerPurchaseCheckRoutes (app: AppInstance): void {
 
     // 库存不足优先作原因；priceChanged 独立布尔，两者可同时为真（D63）。
     if (quantity > variant.stock) {
-      return { result: 'blocked' as const, reason: 'INSUFFICIENT_STOCK' as const, ...common }
+      return { result: 'blocked' as const, reason: 'INSUFFICIENT_STOCK' as const, ...sharedResultFields }
     }
 
     // 价格变化阻止通过，返回请求价与当前价，待用户确认后再次校验（D63）。
-    if (expectedUnitPriceCents !== undefined && expectedUnitPriceCents !== unitPriceCents) {
+    if (priceChanged) {
       return {
         result: 'blocked' as const,
         reason: 'PRICE_CHANGED' as const,
-        ...common,
+        ...sharedResultFields,
         requestedUnitPriceCents: expectedUnitPriceCents,
       }
     }
 
-    return { result: 'purchasable' as const, ...common }
+    return { result: 'purchasable' as const, ...sharedResultFields }
   })
 }

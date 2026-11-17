@@ -2,29 +2,18 @@ import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import type { RowDataPacket } from 'mysql2'
 import type { Pool } from 'mysql2/promise'
-import { createApp, type AppInstance } from '../src/app.ts'
-import { createDb, createPool, type Database } from '../src/db/client.ts'
-import { runMigrations } from '../src/db/migrate.ts'
-import { seedDatabase } from '../src/db/seed.ts'
-import { loadTestConfig } from './helpers/test-config.ts'
+import type { AppInstance } from '../src/app.ts'
+import { closeSeededApp, createSeededApp } from './helpers/seeded-app.ts'
 
-const config = loadTestConfig()
 let pool: Pool
-let db: Database
 let app: AppInstance
 
 before(async () => {
-  pool = createPool(config)
-  db = createDb(pool)
-  await runMigrations(db)
-  await seedDatabase(db)
-  app = await createApp({ db, config })
-  await app.ready()
+  ({ pool, app } = await createSeededApp())
 })
 
 after(async () => {
-  await app.close()
-  await pool.end()
+  await closeSeededApp({ pool, app })
 })
 
 interface CategoryItem {
