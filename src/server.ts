@@ -1,62 +1,60 @@
-import Fastify from 'fastify'
-import { TypeBoxValidatorCompiler } from '@fastify/type-provider-typebox'
-import type { TypeBoxTypeProvider } from '@fastify/type-provider-typebox'
-import { Type } from 'typebox'
-import { describeConfig, loadConfig } from './config.ts'
+import type { Pool } from 'mysql2/promise'
+import { createApp, type AppInstance } from './app.ts'
+import { describeConfig, loadConfig, type AppConfig } from './config.ts'
+import { createDb, createPool } from './db/client.ts'
+import { runIfMain } from './run-if-main.ts'
+
+export interface StartServerOptions {
+  /** 已解析的配置；省略时读取 .env 与进程环境变量。 */
+  config?: AppConfig
+  /** 连接池工厂；默认 createPool。测试注入以观察监听失败时的关闭行为。 */
+  createPool?: (config: AppConfig) => Pool
+  /** 是否输出请求日志；默认开启。 */
+  logger?: boolean
+}
+
+export interface StartedServer {
+  app: AppInstance
+  /** 本次启动创建的连接池；关闭责任归调用方。 */
+  pool: Pool
+  address: string
+}
 
 /**
- * Phase 1 的 V7 夹具：验证 TypeBox 1.x + provider 6 的类型推导与运行时校验。
- * 正式契约（列表 / 详情 / 推荐 / 购买校验）在 Phase 3 建立，见 C37–C38。
+ * 启动入口：创建连接池 → 构建应用 → 监听。
+ * 监听失败时关闭应用与连接池，并把原始错误抛给调用方以非零码退出。
  */
-const Product = Type.Object({
-  id: Type.Integer(),
-  name: Type.String(),
-  price: Type.Number(),
-})
+export async function startServer (options: StartServerOptions = {}): Promise<StartedServer> {
+  const config = options.config ?? loadConfig()
+  const pool = (options.createPool ?? createPool)(config)
+  const app = await createApp({ db: createDb(pool), config, logger: options.logger ?? true })
 
-const app = Fastify({ logger: true })
-  .setValidatorCompiler(TypeBoxValidatorCompiler)
-  .withTypeProvider<TypeBoxTypeProvider>()
+  try {
+    const address = await app.listen({ port: config.port, host: '127.0.0.1' })
+    return { app, pool, address }
+  } catch (error) {
+    try {
+      await app.close()
+    } catch {
+      // 监听失败时应用可能已部分关闭；以原始监听错误为准。
+    }
+    await pool.end()
+    throw error
+  }
+}
 
-app.get('/health', {
-  schema: {
-    response: {
-      200: Type.Object({
-        status: Type.String(),
-      }),
-    },
-  },
-}, async () => ({ status: 'ok' }))
+async function main (): Promise<void> {
+  const config = loadConfig()
+  const { app, address } = await startServer({ config })
+  app.log.info(`[config] ${describeConfig(config)}`)
+  app.log.info(`[server] 实际监听 ${address}`)
+}
 
-app.get('/api/products', {
-  schema: {
-    querystring: Type.Object({
-      page: Type.Optional(Type.Integer({ minimum: 1 })),
-      pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
-      keyword: Type.Optional(Type.String({ maxLength: 100 })),
-    }),
-    response: {
-      200: Type.Object({
-        page: Type.Integer(),
-        pageSize: Type.Integer(),
-        keyword: Type.Optional(Type.String()),
-        items: Type.Array(Product),
-      }),
-    },
-  },
-}, async (request) => {
-  const { page = 1, pageSize = 8, keyword } = request.query
-  return {
-    page,
-    pageSize,
-    ...(keyword === undefined ? {} : { keyword }),
-    items: [],
+await runIfMain(import.meta.url, async () => {
+  try {
+    await main()
+  } catch (error) {
+    console.error('[server] 启动失败：', error instanceof Error ? error.message : error)
+    process.exitCode = 1
   }
 })
-
-// 配置优先级：进程环境变量 > .env > 程序默认（D53）。
-const config = loadConfig()
-app.log.info(`[config] ${describeConfig(config)}`)
-
-const address = await app.listen({ port: config.port, host: '127.0.0.1' })
-app.log.info(`[server] 实际监听 ${address}`)

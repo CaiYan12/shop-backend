@@ -15,10 +15,13 @@
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "node src/db/seed.ts",
     "verify:images": "node src/db/verify-images.ts",
+    "openapi:generate": "node src/generate-openapi.ts",
     "check:terms": "node scripts/check-terms.mjs",
     "prepare": "node scripts/install-hooks.mjs"
   },
   "dependencies": {
+    "@fastify/swagger": "9.9.5",
+    "@fastify/swagger-ui": "6.1.4",
     "@fastify/type-provider-typebox": "6.3.0",
     "dotenv": "18.0.10",
     "drizzle-orm": "0.45.4",

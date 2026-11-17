@@ -1,0 +1,997 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "商品列表与详情 API",
+    "version": "0.1.0"
+  },
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "enum": [
+                  "VALIDATION_FAILED",
+                  "PRODUCT_NOT_FOUND",
+                  "VARIANT_NOT_FOUND",
+                  "VARIANT_NOT_IN_PRODUCT",
+                  "SEARCH_NOT_AVAILABLE",
+                  "NOT_FOUND",
+                  "INTERNAL_ERROR"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "details": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "path",
+                    "message"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "ProductCoverImage": {
+        "type": "object",
+        "required": [
+          "path",
+          "alt"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "alt": {
+            "type": "string"
+          }
+        }
+      },
+      "ProductCategory": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "CategoryListItem": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "CategoriesResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CategoryListItem"
+            }
+          }
+        }
+      },
+      "ProductListItem": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name",
+          "brand",
+          "model",
+          "category",
+          "displayPriceCents",
+          "displayOriginalPriceCents",
+          "soldOut",
+          "rating",
+          "sales",
+          "coverImage"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "brand": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "category": {
+            "$ref": "#/components/schemas/ProductCategory"
+          },
+          "displayPriceCents": {
+            "type": "integer"
+          },
+          "displayOriginalPriceCents": {
+            "type": "integer"
+          },
+          "soldOut": {
+            "type": "boolean"
+          },
+          "rating": {
+            "type": "number"
+          },
+          "sales": {
+            "type": "integer"
+          },
+          "coverImage": {
+            "$ref": "#/components/schemas/ProductCoverImage"
+          }
+        }
+      },
+      "ProductListResponse": {
+        "type": "object",
+        "required": [
+          "page",
+          "pageSize",
+          "total",
+          "totalPages",
+          "items"
+        ],
+        "properties": {
+          "page": {
+            "type": "integer"
+          },
+          "pageSize": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "totalPages": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductListItem"
+            }
+          }
+        }
+      },
+      "ProductRecommendationsResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductListItem"
+            }
+          }
+        }
+      },
+      "ProductDimension": {
+        "type": "object",
+        "required": [
+          "name",
+          "options"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ProductVariant": {
+        "type": "object",
+        "required": [
+          "sku",
+          "option1Value",
+          "option2Value",
+          "priceCents",
+          "originalPriceCents",
+          "stock"
+        ],
+        "properties": {
+          "sku": {
+            "type": "string"
+          },
+          "option1Value": {
+            "type": "string"
+          },
+          "option2Value": {
+            "type": "string"
+          },
+          "priceCents": {
+            "type": "integer"
+          },
+          "originalPriceCents": {
+            "type": "integer"
+          },
+          "stock": {
+            "type": "integer"
+          }
+        }
+      },
+      "ProductDetailBlock": {
+        "anyOf": [
+          {
+            "type": "object",
+            "required": [
+              "type",
+              "text"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "text"
+              },
+              "text": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type",
+              "path",
+              "alt"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "image"
+              },
+              "path": {
+                "type": "string"
+              },
+              "alt": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "ProductDetailResponse": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name",
+          "brand",
+          "model",
+          "category",
+          "displayPriceCents",
+          "displayOriginalPriceCents",
+          "soldOut",
+          "rating",
+          "sales",
+          "coverImage",
+          "stock",
+          "images",
+          "dimensions",
+          "variants",
+          "detail"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "brand": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "category": {
+            "$ref": "#/components/schemas/ProductCategory"
+          },
+          "displayPriceCents": {
+            "type": "integer"
+          },
+          "displayOriginalPriceCents": {
+            "type": "integer"
+          },
+          "soldOut": {
+            "type": "boolean"
+          },
+          "rating": {
+            "type": "number"
+          },
+          "sales": {
+            "type": "integer"
+          },
+          "coverImage": {
+            "$ref": "#/components/schemas/ProductCoverImage"
+          },
+          "stock": {
+            "type": "integer"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductCoverImage"
+            }
+          },
+          "dimensions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductDimension"
+            }
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductVariant"
+            }
+          },
+          "detail": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductDetailBlock"
+            }
+          }
+        }
+      },
+      "PurchaseCheckProduct": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "PurchaseCheckVariant": {
+        "type": "object",
+        "required": [
+          "sku",
+          "option1Value",
+          "option2Value"
+        ],
+        "properties": {
+          "sku": {
+            "type": "string"
+          },
+          "option1Value": {
+            "type": "string"
+          },
+          "option2Value": {
+            "type": "string"
+          }
+        }
+      },
+      "PurchaseCheckResponse": {
+        "anyOf": [
+          {
+            "type": "object",
+            "required": [
+              "result",
+              "product",
+              "variant",
+              "quantity",
+              "unitPriceCents",
+              "subtotalCents",
+              "stock",
+              "priceChanged"
+            ],
+            "properties": {
+              "result": {
+                "type": "string",
+                "const": "purchasable"
+              },
+              "product": {
+                "$ref": "#/components/schemas/PurchaseCheckProduct"
+              },
+              "variant": {
+                "$ref": "#/components/schemas/PurchaseCheckVariant"
+              },
+              "quantity": {
+                "type": "integer"
+              },
+              "unitPriceCents": {
+                "type": "integer"
+              },
+              "subtotalCents": {
+                "type": "integer"
+              },
+              "stock": {
+                "type": "integer"
+              },
+              "priceChanged": {
+                "type": "boolean",
+                "const": false
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "result",
+              "reason",
+              "product",
+              "variant",
+              "quantity",
+              "unitPriceCents",
+              "subtotalCents",
+              "stock",
+              "priceChanged"
+            ],
+            "properties": {
+              "result": {
+                "type": "string",
+                "const": "blocked"
+              },
+              "reason": {
+                "type": "string",
+                "const": "INSUFFICIENT_STOCK"
+              },
+              "product": {
+                "$ref": "#/components/schemas/PurchaseCheckProduct"
+              },
+              "variant": {
+                "$ref": "#/components/schemas/PurchaseCheckVariant"
+              },
+              "quantity": {
+                "type": "integer"
+              },
+              "unitPriceCents": {
+                "type": "integer"
+              },
+              "subtotalCents": {
+                "type": "integer"
+              },
+              "stock": {
+                "type": "integer"
+              },
+              "priceChanged": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "result",
+              "reason",
+              "product",
+              "variant",
+              "quantity",
+              "unitPriceCents",
+              "subtotalCents",
+              "stock",
+              "priceChanged",
+              "requestedUnitPriceCents"
+            ],
+            "properties": {
+              "result": {
+                "type": "string",
+                "const": "blocked"
+              },
+              "reason": {
+                "type": "string",
+                "const": "PRICE_CHANGED"
+              },
+              "product": {
+                "$ref": "#/components/schemas/PurchaseCheckProduct"
+              },
+              "variant": {
+                "$ref": "#/components/schemas/PurchaseCheckVariant"
+              },
+              "quantity": {
+                "type": "integer"
+              },
+              "unitPriceCents": {
+                "type": "integer"
+              },
+              "subtotalCents": {
+                "type": "integer"
+              },
+              "stock": {
+                "type": "integer"
+              },
+              "priceChanged": {
+                "type": "boolean",
+                "const": true
+              },
+              "requestedUnitPriceCents": {
+                "type": "integer"
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "paths": {
+    "/api/products": {
+      "get": {
+        "operationId": "listProducts",
+        "tags": [
+          "商品"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "in": "query",
+            "name": "category",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9999999999
+            },
+            "in": "query",
+            "name": "priceMinCents",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9999999999
+            },
+            "in": "query",
+            "name": "priceMaxCents",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "in": "query",
+            "name": "minSales",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "in": "query",
+            "name": "keyword",
+            "required": false
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "price_asc"
+                },
+                {
+                  "type": "string",
+                  "const": "price_desc"
+                },
+                {
+                  "type": "string",
+                  "const": "sales_desc"
+                }
+              ],
+              "default": "sales_desc"
+            },
+            "in": "query",
+            "name": "sort",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 1
+            },
+            "in": "query",
+            "name": "page",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 8
+            },
+            "in": "query",
+            "name": "pageSize",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/products/{slug}": {
+      "get": {
+        "operationId": "getProduct",
+        "tags": [
+          "商品"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+            },
+            "in": "path",
+            "name": "slug",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/products/{slug}/recommendations": {
+      "get": {
+        "operationId": "listRecommendations",
+        "tags": [
+          "商品"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+            },
+            "in": "path",
+            "name": "slug",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductRecommendationsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/categories": {
+      "get": {
+        "operationId": "listCategories",
+        "tags": [
+          "商品类型"
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoriesResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/purchase-check": {
+      "post": {
+        "operationId": "checkPurchase",
+        "tags": [
+          "购买校验"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "slug",
+                  "sku",
+                  "quantity"
+                ],
+                "properties": {
+                  "slug": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+                  },
+                  "sku": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "quantity": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 999
+                  },
+                  "expectedUnitPriceCents": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9999999999
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseCheckResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:3001"
+    }
+  ],
+  "tags": [
+    {
+      "name": "商品"
+    },
+    {
+      "name": "商品类型"
+    },
+    {
+      "name": "购买校验"
+    }
+  ]
+}

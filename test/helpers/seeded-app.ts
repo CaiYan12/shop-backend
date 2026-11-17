@@ -1,0 +1,43 @@
+import type { Pool } from 'mysql2/promise'
+import { createApp, type AppInstance } from '../../src/app.ts'
+import { createDb, createPool, type Database } from '../../src/db/client.ts'
+import { runMigrations } from '../../src/db/migrate.ts'
+import { seedDatabase } from '../../src/db/seed.ts'
+import { loadTestConfig } from './test-config.ts'
+
+/**
+ * 集成测试共用的「迁移 + 种子 + 应用工厂」生命周期。
+ * 五个接口测试文件原本各写一份 before/after，逻辑只在这里维护。
+ */
+export interface SeededApp {
+  pool: Pool
+  db: Database
+  app: AppInstance
+}
+
+/**
+ * 创建连接池、跑迁移与种子、构建并 ready 应用。
+ * 中途失败时关闭连接池，避免测试进程留下悬挂连接。
+ */
+export async function createSeededApp (): Promise<SeededApp> {
+  const config = loadTestConfig()
+  const pool = createPool(config)
+
+  try {
+    const db = createDb(pool)
+    await runMigrations(db)
+    await seedDatabase(db)
+    const app = await createApp({ db, config })
+    await app.ready()
+    return { pool, db, app }
+  } catch (error) {
+    await pool.end()
+    throw error
+  }
+}
+
+/** 关闭应用与连接池：顺序与创建相反，应用先关。 */
+export async function closeSeededApp ({ pool, app }: Pick<SeededApp, 'pool' | 'app'>): Promise<void> {
+  await app.close()
+  await pool.end()
+}

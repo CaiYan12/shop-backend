@@ -74,7 +74,7 @@ function productVariantSummary (db: Database) {
  * 使用 INNER JOIN 依赖 D49 的不变量：每件商品至少有一个有效组合
  * （由种子校验保证）。没有组合的商品不会出现在结果里。
  */
-function productSummaryQuery (db: Database) {
+export function productSummaryQuery (db: Database) {
   const summary = productVariantSummary(db)
   return db
     .select({
