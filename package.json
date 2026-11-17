@@ -15,6 +15,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "node src/db/seed.ts",
     "verify:images": "node src/db/verify-images.ts",
+    "openapi:generate": "node src/generate-openapi.ts",
     "check:terms": "node scripts/check-terms.mjs",
     "prepare": "node scripts/install-hooks.mjs"
   },
