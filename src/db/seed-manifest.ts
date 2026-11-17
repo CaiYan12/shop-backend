@@ -7,6 +7,16 @@ export interface SeedImage {
   alt: string
 }
 
+/** 一个规格组合：两个维度各取一个选项，持有独立价格、原价与库存（D40、D43、D44）。 */
+export interface SeedVariant {
+  sku: string
+  option1Value: string
+  option2Value: string
+  price: number
+  originalPrice: number
+  stock: number
+}
+
 /** 一件待导入商品；图片顺序即展示顺序，sort_order 由数组下标派生。 */
 export interface SeedProduct {
   slug: string
@@ -18,6 +28,8 @@ export interface SeedProduct {
   sales: number
   detail: DetailBlock[]
   dimensions: DimensionMetadata[]
+  /** 逐件定义的有效组合；至少一个，选项值必须精确引用 dimensions 声明的选项。 */
+  variants: SeedVariant[]
   images: SeedImage[]
 }
 
@@ -126,6 +138,71 @@ function validateDimensions (product: SeedProduct): void {
   }
 }
 
+/** decimal(10,2) 能表示的最大金额。 */
+const MAX_PRICE = 99999999.99
+
+function assertPrice (value: unknown, label: string): asserts value is number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > MAX_PRICE) {
+    throw new SeedValidationError(`${label} 必须是 0–${MAX_PRICE} 之间的数字`)
+  }
+  // decimal(10,2) 只保留两位小数；先拒绝多余精度，避免入库时被静默四舍五入。
+  if (Number(value.toFixed(2)) !== value) {
+    throw new SeedValidationError(`${label} 最多两位小数：${value}`)
+  }
+}
+
+/**
+ * 校验规格组合（D40–D44）：选项值必须精确等于商品声明的选项（严格字符串比较，
+ * 保留大小写与全半角），同一商品内组合唯一，库存非负，价格最多两位小数。
+ * 返回本商品的 sku 列表，供整份清单做全局唯一校验。
+ */
+function validateVariants (product: SeedProduct): string[] {
+  const variants = product.variants
+  if (!Array.isArray(variants) || variants.length === 0) {
+    throw new SeedValidationError(`商品 ${product.slug} 至少需要一个有效规格组合`)
+  }
+
+  const declaredOptions = product.dimensions.map((dimension) => new Set(dimension.options))
+  const seen = new Set<string>()
+  const skus: string[] = []
+
+  for (const variant of variants) {
+    assertNonEmptyString(variant.sku, `商品 ${product.slug} 的 sku`)
+    if (variant.sku !== variant.sku.trim()) {
+      throw new SeedValidationError(`商品 ${product.slug} 的 sku 不得有首尾空白：${variant.sku}`)
+    }
+
+    const values = [variant.option1Value, variant.option2Value]
+    values.forEach((value, index) => {
+      assertNonEmptyString(value, `商品 ${product.slug} 的组合 ${variant.sku} 的选项值`)
+      const dimension = product.dimensions[index]!
+      if (!declaredOptions[index]!.has(value)) {
+        throw new SeedValidationError(
+          `商品 ${product.slug} 的组合 ${variant.sku} 的选项值 ${JSON.stringify(value)} 不是规格维度 ${dimension.name} 声明的选项`,
+        )
+      }
+    })
+
+    const combination = JSON.stringify([variant.option1Value, variant.option2Value])
+    if (seen.has(combination)) {
+      throw new SeedValidationError(
+        `商品 ${product.slug} 的规格组合重复：${variant.option1Value} / ${variant.option2Value}`,
+      )
+    }
+    seen.add(combination)
+
+    assertPrice(variant.price, `商品 ${product.slug} 的组合 ${variant.sku} 的价格`)
+    assertPrice(variant.originalPrice, `商品 ${product.slug} 的组合 ${variant.sku} 的原价`)
+    if (!Number.isInteger(variant.stock) || variant.stock < 0) {
+      throw new SeedValidationError(`商品 ${product.slug} 的组合 ${variant.sku} 的库存必须是非负整数`)
+    }
+
+    skus.push(variant.sku)
+  }
+
+  return skus
+}
+
 function validateDetail (product: SeedProduct): void {
   if (!Array.isArray(product.detail) || product.detail.length === 0) {
     throw new SeedValidationError(`商品 ${product.slug} 的详情块不能为空`)
@@ -180,6 +257,7 @@ export function validateManifest (manifest: SeedManifest): void {
   }
 
   const productSlugs = new Set<string>()
+  const variantSkus = new Set<string>()
   for (const product of manifest.products) {
     assertSlug(product.slug, '商品 slug')
     if (productSlugs.has(product.slug)) {
@@ -200,6 +278,12 @@ export function validateManifest (manifest: SeedManifest): void {
     }
 
     validateDimensions(product)
+    for (const sku of validateVariants(product)) {
+      if (variantSkus.has(sku)) {
+        throw new SeedValidationError(`规格组合 sku 重复：${sku}`)
+      }
+      variantSkus.add(sku)
+    }
     validateDetail(product)
     validateImages(product)
   }

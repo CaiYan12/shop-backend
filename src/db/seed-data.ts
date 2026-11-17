@@ -22,6 +22,12 @@ export const SEED_MANIFEST: SeedManifest = {
         { name: '颜色', options: ['曜石黑', '雾白'] },
         { name: '版本', options: ['标准版', '降噪版'] },
       ],
+      variants: [
+        { sku: 'AUR-H1-BK-STD', option1Value: '曜石黑', option2Value: '标准版', price: 899, originalPrice: 1099, stock: 120 },
+        { sku: 'AUR-H1-BK-ANC', option1Value: '曜石黑', option2Value: '降噪版', price: 1099, originalPrice: 1299, stock: 45 },
+        { sku: 'AUR-H1-WH-STD', option1Value: '雾白', option2Value: '标准版', price: 899, originalPrice: 1099, stock: 0 },
+        { sku: 'AUR-H1-WH-ANC', option1Value: '雾白', option2Value: '降噪版', price: 1099, originalPrice: 1299, stock: 18 },
+      ],
       detail: [
         { type: 'text', text: '40mm 动圈单元配主动降噪，通勤与办公场景都能压住环境噪声。' },
         { type: 'image', path: '/images/products/aurora-headphones/2.webp', alt: '耳机侧面与耳罩细节' },
@@ -46,6 +52,12 @@ export const SEED_MANIFEST: SeedManifest = {
         { name: '颜色', options: ['月岩灰', '薄荷绿'] },
         { name: '充电盒', options: ['标准版', '无线充版'] },
       ],
+      variants: [
+        { sku: 'PLS-T2-GY-STD', option1Value: '月岩灰', option2Value: '标准版', price: 399, originalPrice: 499, stock: 200 },
+        { sku: 'PLS-T2-GY-WL', option1Value: '月岩灰', option2Value: '无线充版', price: 499, originalPrice: 599, stock: 76 },
+        { sku: 'PLS-T2-GR-STD', option1Value: '薄荷绿', option2Value: '标准版', price: 399, originalPrice: 499, stock: 33 },
+        { sku: 'PLS-T2-GR-WL', option1Value: '薄荷绿', option2Value: '无线充版', price: 499, originalPrice: 599, stock: 0 },
+      ],
       detail: [
         { type: 'text', text: '半入耳设计，单耳 4.2g；双麦克风通话降噪，地铁里也能听清。' },
         { type: 'image', path: '/images/products/pulse-earbuds/1.webp', alt: '脉冲真无线耳机与充电盒' },
@@ -69,6 +81,12 @@ export const SEED_MANIFEST: SeedManifest = {
       dimensions: [
         { name: '表带', options: ['硅胶', '编织'] },
         { name: '表盘', options: ['42mm', '46mm'] },
+      ],
+      variants: [
+        { sku: 'ORB-W3-SIL-42', option1Value: '硅胶', option2Value: '42mm', price: 1299, originalPrice: 1499, stock: 64 },
+        { sku: 'ORB-W3-SIL-46', option1Value: '硅胶', option2Value: '46mm', price: 1399, originalPrice: 1599, stock: 21 },
+        { sku: 'ORB-W3-WVN-42', option1Value: '编织', option2Value: '42mm', price: 1499, originalPrice: 1699, stock: 12 },
+        { sku: 'ORB-W3-WVN-46', option1Value: '编织', option2Value: '46mm', price: 1599, originalPrice: 1799, stock: 0 },
       ],
       detail: [
         { type: 'text', text: '1.8 英寸 AMOLED 屏幕，支持全天心率与血氧监测。' },

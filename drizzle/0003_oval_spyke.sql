@@ -1,0 +1,3 @@
+ALTER TABLE `product_variants` ADD CONSTRAINT `product_variants_sku_unique` UNIQUE(`sku`);--> statement-breakpoint
+ALTER TABLE `product_variants` ADD CONSTRAINT `product_variants_product_id_options_unique` UNIQUE(`product_id`,`option1_value`,`option2_value`);--> statement-breakpoint
+ALTER TABLE `product_variants` ADD CONSTRAINT `product_variants_stock_check` CHECK (`product_variants`.`stock` >= 0);

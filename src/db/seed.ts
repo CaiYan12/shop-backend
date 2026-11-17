@@ -1,20 +1,22 @@
-import { eq } from 'drizzle-orm'
+import { and, eq, notInArray } from 'drizzle-orm'
 import { pathToFileURL } from 'node:url'
 import { describeConfig, loadConfig } from '../config.ts'
 import { createDb, createPool, type Database } from './client.ts'
 import { SEED_MANIFEST } from './seed-data.ts'
 import { validateManifest, type SeedManifest } from './seed-manifest.ts'
-import { categories, productImages, products } from './schema.ts'
+import { categories, productImages, products, productVariants } from './schema.ts'
 
 export interface SeedResult {
   categories: number
   products: number
+  variants: number
   images: number
 }
 
 /**
  * 按稳定键导入种子数据（D52）：
- * - 商品类型、商品按 slug upsert，图片按商品整体替换；
+ * - 商品类型、商品按 slug upsert，规格组合按 sku upsert，图片按商品整体替换；
+ * - 本次清单中已移除的规格组合被删除（D52）；
  * - 未出现在本次清单里的商品与分类保持不动，因此支持分批导入；
  * - 普通导入使用单事务，任一步失败整体回滚。
  */
@@ -33,6 +35,7 @@ export async function seedDatabase (
     }
 
     let imageCount = 0
+    let variantCount = 0
     for (const product of manifest.products) {
       const [category] = await tx
         .select({ id: categories.id })
@@ -89,11 +92,46 @@ export async function seedDatabase (
         })),
       )
       imageCount += product.images.length
+
+      for (const variant of product.variants) {
+        const variantValues = {
+          productId: stored.id,
+          sku: variant.sku,
+          option1Value: variant.option1Value,
+          option2Value: variant.option2Value,
+          price: variant.price,
+          originalPrice: variant.originalPrice,
+          stock: variant.stock,
+        }
+        await tx
+          .insert(productVariants)
+          .values(variantValues)
+          .onDuplicateKeyUpdate({
+            set: {
+              productId: variantValues.productId,
+              option1Value: variantValues.option1Value,
+              option2Value: variantValues.option2Value,
+              price: variantValues.price,
+              originalPrice: variantValues.originalPrice,
+              stock: variantValues.stock,
+            },
+          })
+      }
+
+      // 删除本次清单中已移除的组合；清单至少有一个组合，因此 notInArray 不会退化为空条件。
+      await tx
+        .delete(productVariants)
+        .where(and(
+          eq(productVariants.productId, stored.id),
+          notInArray(productVariants.sku, product.variants.map((variant) => variant.sku)),
+        ))
+      variantCount += product.variants.length
     }
 
     return {
       categories: manifest.categories.length,
       products: manifest.products.length,
+      variants: variantCount,
       images: imageCount,
     }
   })
@@ -107,7 +145,7 @@ async function main (): Promise<void> {
     const db = createDb(pool)
     const result = await seedDatabase(db)
     console.log(
-      `[seed] 完成：商品类型 ${result.categories} 个、商品 ${result.products} 件、图片 ${result.images} 张。`,
+      `[seed] 完成：商品类型 ${result.categories} 个、商品 ${result.products} 件、规格组合 ${result.variants} 个、图片 ${result.images} 张。`,
     )
   } finally {
     await pool.end()

@@ -58,6 +58,29 @@ export const products = mysqlTable('products', {
 ])
 
 /**
+ * 规格组合：商品下的一个可售单元，持有独立价格、原价与库存（D40、D43、D44）。
+ * 组合级只用两个选项值列，按商品声明的维度顺序解释；不另存组合的 specs JSON（ADR 0001）。
+ */
+export const productVariants = mysqlTable('product_variants', {
+  id: int('id').autoincrement().primaryKey(),
+  productId: int('product_id').notNull().references(() => products.id, { onDelete: 'cascade' }),
+  sku: varchar('sku', { length: 64 }).notNull(),
+  option1Value: varchar('option1_value', { length: 64 }).notNull(),
+  option2Value: varchar('option2_value', { length: 64 }).notNull(),
+  price: decimal('price', { precision: 10, scale: 2, mode: 'number' }).notNull(),
+  originalPrice: decimal('original_price', { precision: 10, scale: 2, mode: 'number' }).notNull(),
+  stock: int('stock').notNull(),
+}, (table) => [
+  uniqueIndex('product_variants_sku_unique').on(table.sku),
+  uniqueIndex('product_variants_product_id_options_unique').on(
+    table.productId,
+    table.option1Value,
+    table.option2Value,
+  ),
+  check('product_variants_stock_check', sql`${table.stock} >= 0`),
+])
+
+/**
  * 商品图片：路径为 /images/products/{slug}/n.webp 形式的相对路径（D48），
  * 归属由应用层按规范化路径校验；图片按商品整体替换（D52）。
  */

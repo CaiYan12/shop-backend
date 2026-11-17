@@ -15,6 +15,20 @@
       "when": 1794894807004,
       "tag": "0001_cultured_reavers",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1794895298653,
+      "tag": "0002_boring_lady_mastermind",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1794895394472,
+      "tag": "0003_oval_spyke",
+      "breakpoints": true
     }
   ]
 }
