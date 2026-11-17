@@ -113,6 +113,74 @@ export const ProductSlugParams = Type.Object({
 })
 
 /**
+ * 购买校验请求（D63、D68）：单件商品的所选规格组合与数量；
+ * 预期单价可选，未提供表示本次不做价格确认。
+ */
+export const PurchaseCheckBody = Type.Object({
+  slug: Type.String({ minLength: 1, maxLength: 64, pattern: SLUG_PATTERN.source }),
+  sku: Type.String({ minLength: 1, maxLength: 64 }),
+  quantity: Type.Integer({ minimum: 1, maximum: 999 }),
+  expectedUnitPriceCents: Type.Optional(Type.Integer({ minimum: 0, maximum: 9_999_999_999 })),
+})
+
+/** 购买校验回显的商品标识（D63）。 */
+export const PurchaseCheckProduct = Type.Object({
+  slug: Type.String(),
+  name: Type.String(),
+}, { $id: 'PurchaseCheckProduct' })
+
+/** 购买校验回显的规格组合标识（D63）。 */
+export const PurchaseCheckVariant = Type.Object({
+  sku: Type.String(),
+  option1Value: Type.String(),
+  option2Value: Type.String(),
+}, { $id: 'PurchaseCheckVariant' })
+
+/** 三分支共同字段（D63）：商品、规格组合、数量、单价、小计与库存。 */
+const PurchaseCheckCommonProperties = {
+  product: Type.Ref('PurchaseCheckProduct'),
+  variant: Type.Ref('PurchaseCheckVariant'),
+  quantity: Type.Integer(),
+  unitPriceCents: Type.Integer(),
+  subtotalCents: Type.Integer(),
+  stock: Type.Integer(),
+}
+
+/** 可购买分支（D63）：价格未变化，`priceChanged` 恒为 false。 */
+const PurchaseCheckPurchasable = Type.Object({
+  result: Type.Literal('purchasable'),
+  ...PurchaseCheckCommonProperties,
+  priceChanged: Type.Literal(false),
+})
+
+/** 库存不足分支（D63）：库存不足优先作原因；`priceChanged` 独立布尔，可与原因同时为真。 */
+const PurchaseCheckBlockedInsufficientStock = Type.Object({
+  result: Type.Literal('blocked'),
+  reason: Type.Literal('INSUFFICIENT_STOCK'),
+  ...PurchaseCheckCommonProperties,
+  priceChanged: Type.Boolean(),
+})
+
+/** 价格变化分支（D63）：必带请求价，`priceChanged` 恒为 true。 */
+const PurchaseCheckBlockedPriceChanged = Type.Object({
+  result: Type.Literal('blocked'),
+  reason: Type.Literal('PRICE_CHANGED'),
+  ...PurchaseCheckCommonProperties,
+  priceChanged: Type.Literal(true),
+  requestedUnitPriceCents: Type.Integer(),
+})
+
+/**
+ * 购买校验响应（D63）：三分支以 `anyOf` + `const` 组成可穷尽联合（V18），
+ * 前端对 `result`（必要时连同 `reason`）写穷尽检查。
+ */
+export const PurchaseCheckResponse = Type.Union([
+  PurchaseCheckPurchasable,
+  PurchaseCheckBlockedInsufficientStock,
+  PurchaseCheckBlockedPriceChanged,
+], { $id: 'PurchaseCheckResponse' })
+
+/**
  * 注册共享 schema：同一 `$id` 只能注册一次（Fastify 重复注册会拒绝），
  * 因此由应用工厂统一调用，路由模块只引用。
  */
@@ -128,4 +196,7 @@ export function registerProductSchemas (app: AppInstance): void {
   app.addSchema(ProductVariant)
   app.addSchema(ProductDetailBlock)
   app.addSchema(ProductDetailResponse)
+  app.addSchema(PurchaseCheckProduct)
+  app.addSchema(PurchaseCheckVariant)
+  app.addSchema(PurchaseCheckResponse)
 }
