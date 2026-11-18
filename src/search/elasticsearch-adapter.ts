@@ -500,4 +500,3 @@ export class ElasticsearchProductSearchAdapter implements ProductSearchAdapter {
     return { items: response.hits.hits.map(readSuggestionItem) }
   }
 }
-
