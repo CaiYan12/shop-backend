@@ -217,3 +217,73 @@ test('切换别名后失败且回滚失败时，保留别名仍指向的新索�
   assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v2'])
   assert.equal(adapter.indices.has('products_v2'), true, '新索引必须保留，供人工处理')
 })
+
+/**
+ * 模拟「服务端已完成别名切换，但调用方收到异常」（P1-A）：
+ * 先真正应用 add/remove，再抛错，复现「已生效但响应丢失」。
+ */
+class AppliedThenFailedAliasAdapter extends RecordingProductIndexAdapter {
+  /** 为 true 时，切换抛错后的别名核对也失败，模拟状态未知。 */
+  failAliasQueryAfterUpdate = false
+  private aliasQueryFailurePending = false
+
+  override async updateAlias (alias: string, add: string[], remove: string[]): Promise<void> {
+    await super.updateAlias(alias, add, remove)
+    if (this.failAliasQueryAfterUpdate) this.aliasQueryFailurePending = true
+    throw new Error('模拟的响应丢失：别名切换已生效但调用方未收到响应')
+  }
+
+  override async aliasIndices (alias: string): Promise<string[]> {
+    if (this.aliasQueryFailurePending) {
+      this.aliasQueryFailurePending = false
+      throw new Error('模拟的别名查询超时')
+    }
+    return super.aliasIndices(alias)
+  }
+}
+
+test('P1-A：别名切换已生效但调用抛异常时，保留仍被别名引用的新索引', async () => {
+  const adapter = new AppliedThenFailedAliasAdapter()
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /模拟的响应丢失/)
+    assert.match(error.message, /仍被别名 products_test 引用，已保留/)
+    assert.doesNotMatch(error.message, /未切换别名/)
+    return true
+  })
+
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v1'], '别名目标仍应是新索引')
+  assert.equal(adapter.indices.has('products_v1'), true, '仍被别名引用的新索引不得删除')
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'deleteIndex'),
+    false,
+    '不得删除新索引',
+  )
+  assert.equal(
+    adapter.steps.filter((step) => step.name === 'aliasIndices').length,
+    2,
+    'catch 必须重新核对别名，不能依赖本地的 aliasSwitched',
+  )
+})
+
+test('P1-A：别名状态查询失败时视为未知，保留新索引并说明无法确认', async () => {
+  const adapter = new AppliedThenFailedAliasAdapter()
+  adapter.failAliasQueryAfterUpdate = true
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /别名状态未知/)
+    assert.match(error.message, /无法确认/)
+    assert.match(error.message, /已保留/)
+    return true
+  })
+
+  assert.equal(adapter.indices.has('products_v1'), true, '状态未知时不得删除新索引')
+  assert.equal(
+    adapter.steps.filter((step) => step.name === 'deleteIndex').length,
+    0,
+    '状态未知时不得调用 deleteIndex',
+  )
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v1'])
+})

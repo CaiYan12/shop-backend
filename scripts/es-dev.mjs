@@ -3,7 +3,8 @@
  * 启动 Elasticsearch 并记录进程归属，供 es-stop.mjs 校验（C47）。
  *
  * 流程：先探测 http://127.0.0.1:9201/ 是否已有可用实例；可用则复用、不启动第二个进程。
- * 需要启动时创建进程、等待就绪；超时输出日志目录中最新的日志末尾若干行。
+ * 需要启动时记录启动器 PID、等待就绪；只有确认监听者属于本次启动才终止或写记录。
+ * 超时输出日志目录中最新的日志末尾若干行。
  *
  * 与 dev.mjs 同构，但记录写在单独的 .run/es.json：两个进程生命周期互相独立，
  * 后端停掉后 ES 可能仍在运行，反之亦然，混在一份记录里会互相覆盖。
@@ -14,6 +15,7 @@ import { spawnSync } from 'node:child_process'
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isOwnedByLaunch } from './es-ownership.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const runDir = join(root, '.run')
@@ -84,6 +86,42 @@ function processInfo (pid) {
   } catch {
     return null
   }
+}
+
+/**
+ * 读取 PID、父 PID、可执行路径与命令行。归属判定需要 ParentProcessId，
+ * Get-Process 不提供，因此单独走 Get-CimInstance。
+ */
+function processRecord (pid) {
+  const script = [
+    "$ErrorActionPreference='Stop';",
+    '$p = Get-CimInstance Win32_Process -Filter "ProcessId = ' + pid + '";',
+    'if ($null -eq $p) { exit 3 };',
+    '[pscustomobject]@{ pid = [int]$p.ProcessId; parentPid = [int]$p.ParentProcessId; execPath = $p.ExecutablePath; commandLine = $p.CommandLine } | ConvertTo-Json -Compress',
+  ].join(' ')
+  const result = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8' })
+  if (result.status !== 0 || !result.stdout) return null
+  try {
+    const info = JSON.parse(result.stdout.replace(/^\uFEFF/, ''))
+    return {
+      pid: Number(info.pid),
+      parentPid: Number.isInteger(info.parentPid) ? info.parentPid : null,
+      execPath: typeof info.execPath === 'string' ? info.execPath : null,
+      commandLine: typeof info.commandLine === 'string' ? info.commandLine : null,
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 监听者是否属于本次启动：启动器本身或其后代，且路径/命令行能佐证来自 ES 安装目录。 */
+function ownershipOf (listenerPid, launcherPid) {
+  return isOwnedByLaunch({
+    listenerPid,
+    launcherPid,
+    esHome: CONFIG.home,
+    lookup: processRecord,
+  })
 }
 
 /** 只读文件末尾若干字节，避免为了看几行日志把整份日志读进内存。 */
@@ -227,19 +265,25 @@ const launch = spawnSync('powershell', [
   '-Command',
   "Start-Process -FilePath '" + launcher.replace(/'/g, "''") + "'" +
     " -WorkingDirectory '" + CONFIG.home.replace(/'/g, "''") + "'" +
-    ' -WindowStyle Hidden',
+    ' -WindowStyle Hidden -PassThru | Select-Object -ExpandProperty Id',
 ], { encoding: 'utf8' })
 if (launch.status !== 0) {
   console.error('[es] 启动失败：' + ((launch.stderr ?? '').trim() || 'Start-Process 返回非零'))
   process.exit(1)
 }
+const launcherPid = Number((launch.stdout ?? '').trim())
+if (!Number.isInteger(launcherPid) || launcherPid <= 0) {
+  console.error('[es] 启动失败：无法取得本次启动器的 PID（输出 ' + JSON.stringify((launch.stdout ?? '').trim()) + '）')
+  process.exit(1)
+}
+console.log('[es] 启动器 PID ' + launcherPid)
 
-let pid = null
+let listenerPid = null
 let ready = false
 const deadline = Date.now() + CONFIG.readyTimeoutMs
 while (Date.now() < deadline) {
   await sleep(CONFIG.pollMs)
-  if (pid === null) pid = pidOnPort(CONFIG.httpPort)
+  if (listenerPid === null) listenerPid = pidOnPort(CONFIG.httpPort)
   const status = await clusterHealth()
   if (status === 'yellow' || status === 'green') {
     ready = true
@@ -249,21 +293,43 @@ while (Date.now() < deadline) {
 
 if (!ready) {
   reportTimeout('等待 Elasticsearch 就绪超时（' + Math.round(CONFIG.readyTimeoutMs / 1000) + 's）')
-  killTree(pid, '监听端口的进程')
+  if (listenerPid === null) {
+    console.error('[es] 没有发现监听 ' + CONFIG.httpPort + ' 的进程，本次没有可终止的进程')
+  } else {
+    const ownership = ownershipOf(listenerPid, launcherPid)
+    if (ownership.owned) {
+      killTree(listenerPid, '本次启动的监听进程')
+    } else {
+      console.error('[es] 端口 ' + CONFIG.httpPort + ' 被外部进程 ' + listenerPid + ' 占用，本次不终止')
+      console.error('[es] ' + ownership.reason)
+    }
+  }
   process.exit(1)
 }
 
 const elapsedMs = Date.now() - startedAt
-if (pid === null) pid = pidOnPort(CONFIG.httpPort)
+if (listenerPid === null) listenerPid = pidOnPort(CONFIG.httpPort)
+if (listenerPid === null) {
+  console.error('[es] 已就绪但无法确定监听 ' + CONFIG.httpPort + ' 的进程，归属无法证明')
+  console.error('[es] 本次不写运行记录，也不宣称启动成功')
+  process.exit(1)
+}
+const ownership = ownershipOf(listenerPid, launcherPid)
+if (!ownership.owned) {
+  console.error('[es] 端口 ' + CONFIG.httpPort + ' 被外部进程 ' + listenerPid + ' 占用，本次不写运行记录')
+  console.error('[es] ' + ownership.reason)
+  process.exit(1)
+}
+
 const readyInfo = await clusterInfo()
-const proc = pid === null ? null : processInfo(pid)
+const proc = processInfo(listenerPid)
 if (proc === null || proc.startTime === null || proc.execPath === null) {
-  console.error('[es] 无法读取进程 ' + String(pid) + ' 的启动时间与可执行路径；停止时需要人工核对 .run/es.json')
+  console.error('[es] 无法读取进程 ' + listenerPid + ' 的启动时间与可执行路径；停止时需要人工核对 .run/es.json')
 }
 
 writeFileSync(pidFile, JSON.stringify({
   name: CONFIG.name,
-  pid,
+  pid: listenerPid,
   startTime: proc?.startTime ?? null,
   execPath: proc?.execPath ?? null,
   httpPort: CONFIG.httpPort,
@@ -272,4 +338,4 @@ writeFileSync(pidFile, JSON.stringify({
   startupMs: elapsedMs,
 }, null, 2) + '\n', 'utf8')
 
-console.log('[es] Elasticsearch 已就绪：pid=' + String(pid) + ' 版本 ' + (readyInfo?.version?.number ?? '未知') + ' 端口 ' + CONFIG.httpPort + ' 耗时 ' + (elapsedMs / 1000).toFixed(1) + 's')
+console.log('[es] Elasticsearch 已就绪：pid=' + listenerPid + ' 版本 ' + (readyInfo?.version?.number ?? '未知') + ' 端口 ' + CONFIG.httpPort + ' 耗时 ' + (elapsedMs / 1000).toFixed(1) + 's')

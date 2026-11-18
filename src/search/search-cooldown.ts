@@ -40,6 +40,9 @@ export function withSearchCooldown (
   const now = options.now ?? ((): number => Date.now())
   // 窗口结束时刻；undefined 表示没有冷却。
   let openUntil: number | undefined
+  // 窗口代次：每次开窗/续窗递增。请求开始时记录当时的代次，
+  // 只有代次未变的成功才能关闭窗口，避免开窗前发出、开窗后才返回的迟到成功清掉新窗口。
+  let windowGeneration = 0
   // 是否已有一次恢复探测在执行：并发请求据此判断「只允许一个真正探测」。
   let probing = false
 
@@ -48,6 +51,7 @@ export function withSearchCooldown (
   }
 
   async function run<T> (call: () => Promise<T>): Promise<T> {
+    const generation = windowGeneration
     const deadline = openUntil
     // 窗口已到期才允许探测；没有冷却时（deadline 为 undefined）走常规路径。
     const isProbe = deadline !== undefined && now() >= deadline
@@ -60,11 +64,13 @@ export function withSearchCooldown (
 
     try {
       const result = await call()
-      openUntil = undefined
+      // 只有窗口代次未变的成功才关闭窗口；更早发出的迟到成功不能解除冷却。
+      if (generation === windowGeneration) openUntil = undefined
       return result
     } catch (error) {
       if (error instanceof SearchUnavailableError) {
-        // 可用性故障：开窗或续窗。程序错误不改变窗口，避免把 500 当成降级。
+        // 可用性故障：开窗或续窗，并递增代次。程序错误不改变窗口，避免把 500 当成降级。
+        windowGeneration += 1
         openUntil = now() + cooldownMs
       }
       throw error

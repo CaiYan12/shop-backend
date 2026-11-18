@@ -169,7 +169,15 @@ export class ElasticsearchProductIndexAdapter implements ProductIndexAdapter {
       ...remove.map((index) => ({ remove: { index, alias } })),
     ]
     if (actions.length === 0) return
-    await this.client.indices.updateAliases({ actions })
+    const response: { acknowledged?: boolean, errors?: boolean } =
+      await this.client.indices.updateAliases({ actions })
+    // HTTP 200 也可能只是受理了请求：未确认或带错误时按失败处理，
+    // 让重建流程进入别名核对，而不是误以为未切换后删掉新索引。
+    if (response.acknowledged !== true || response.errors === true) {
+      throw new Error(
+        `切换别名 ${alias} 未成功：acknowledged=${String(response.acknowledged)}，errors=${String(response.errors ?? false)}。`,
+      )
+    }
   }
 
   async searchTotal (index: string): Promise<number> {
