@@ -10,7 +10,7 @@
  *
  * 本脚本失败不阻断后端：start.bat 不用 && 串联，es-dev.mjs 非零退出后照常启动应用。
  */
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -217,16 +217,22 @@ mkdirSync(CONFIG.logDir, { recursive: true })
 
 const startedAt = Date.now()
 console.log('[es] 启动 ' + launcher)
-// .bat 无法直接 spawn（Node 对 .cmd/.bat 有安全限制），交给 cmd 执行；
-// detached + stdio ignore 让 ES 与启动入口脱钩，后端退出不影响它。
-const child = spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', '"' + launcher + '"'], {
-  cwd: CONFIG.home,
-  detached: true,
-  stdio: 'ignore',
-  windowsHide: true,
-  windowsVerbatimArguments: true,
-})
-child.unref()
+// 用 PowerShell 的 Start-Process -WindowStyle Hidden 拉起（#26）：
+// - .bat 不能直接 spawn，交给 cmd 时 Node 的 detached 会给子进程一个新控制台窗口，桌面上可见；
+// - 那个控制台窗口一旦关闭，ES 也随之退出（启动入口的控制台不再存活时尤其明显）。
+// Start-Process 不产生可见窗口，也不把 ES 绑在启动入口的控制台上。
+const launch = spawnSync('powershell', [
+  '-NoProfile',
+  '-NonInteractive',
+  '-Command',
+  "Start-Process -FilePath '" + launcher.replace(/'/g, "''") + "'" +
+    " -WorkingDirectory '" + CONFIG.home.replace(/'/g, "''") + "'" +
+    ' -WindowStyle Hidden',
+], { encoding: 'utf8' })
+if (launch.status !== 0) {
+  console.error('[es] 启动失败：' + ((launch.stderr ?? '').trim() || 'Start-Process 返回非零'))
+  process.exit(1)
+}
 
 let pid = null
 let ready = false
@@ -244,7 +250,6 @@ while (Date.now() < deadline) {
 if (!ready) {
   reportTimeout('等待 Elasticsearch 就绪超时（' + Math.round(CONFIG.readyTimeoutMs / 1000) + 's）')
   killTree(pid, '监听端口的进程')
-  killTree(child.pid, '启动入口创建的进程')
   process.exit(1)
 }
 
