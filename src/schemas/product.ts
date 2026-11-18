@@ -66,13 +66,33 @@ const ProductListItemProperties = {
 
 export const ProductListItem = Type.Object(ProductListItemProperties, { $id: 'ProductListItem' })
 
+/**
+ * 命中高亮（#23）：按字段组织，每个片段是一段可直接渲染的文本。
+ * 命中部分固定用不带其它标记的 `<em>` 包裹，原文里的 HTML 已在 ES 侧转义成实体；
+ * 未命中的字段不出现（不是空数组），没有片段时整个 `highlight` 不出现。
+ */
+export const ProductHighlight = Type.Object({
+  name: Type.Optional(Type.Array(Type.String())),
+  brand: Type.Optional(Type.Array(Type.String())),
+  model: Type.Optional(Type.Array(Type.String())),
+}, { $id: 'ProductHighlight' })
+
+/**
+ * 搜索列表项（#23）：列表项字段 + 可选命中高亮。
+ * 详情与相关推荐仍用 `ProductListItem`，不带高亮。
+ */
+export const ProductSearchListItem = Type.Object({
+  ...ProductListItemProperties,
+  highlight: Type.Optional(Type.Ref('ProductHighlight')),
+}, { $id: 'ProductSearchListItem' })
+
 /** 列表响应（D60）：页码式分页，`total` 为 0 时 `totalPages` 也为 0。 */
 export const ProductListResponse = Type.Object({
   page: Type.Integer(),
   pageSize: Type.Integer(),
   total: Type.Integer(),
   totalPages: Type.Integer(),
-  items: Type.Array(Type.Ref('ProductListItem')),
+  items: Type.Array(Type.Ref('ProductSearchListItem')),
 }, { $id: 'ProductListResponse' })
 
 /** 相关推荐响应（D66）：最多 4 件，字段与列表项一致；非分页集合统一带 `items`。 */
@@ -80,11 +100,18 @@ export const ProductRecommendationsResponse = Type.Object({
   items: Type.Array(Type.Ref('ProductListItem')),
 }, { $id: 'ProductRecommendationsResponse' })
 
-/** 商品联想条目（#22）：只用索引里已有的稳定标识与展示文本，本票不含高亮（#23）。 */
+/** 联想条目的命中高亮（#23）：与联想条目一样只覆盖 name / brand。 */
+export const ProductSuggestionHighlight = Type.Object({
+  name: Type.Optional(Type.Array(Type.String())),
+  brand: Type.Optional(Type.Array(Type.String())),
+}, { $id: 'ProductSuggestionHighlight' })
+
+/** 商品联想条目（#22、#23）：只用索引里已有的稳定标识与展示文本，命中时附加可选高亮。 */
 export const ProductSuggestionItem = Type.Object({
   slug: Type.String(),
   name: Type.String(),
   brand: Type.String(),
+  highlight: Type.Optional(Type.Ref('ProductSuggestionHighlight')),
 }, { $id: 'ProductSuggestionItem' })
 
 /** 商品联想响应（#22）：最多 limit 条；非分页集合统一带 `items`。 */
@@ -219,8 +246,11 @@ export function registerProductSchemas (app: AppInstance): void {
   app.addSchema(CategoryListItem)
   app.addSchema(CategoriesResponse)
   app.addSchema(ProductListItem)
+  app.addSchema(ProductHighlight)
+  app.addSchema(ProductSearchListItem)
   app.addSchema(ProductListResponse)
   app.addSchema(ProductRecommendationsResponse)
+  app.addSchema(ProductSuggestionHighlight)
   app.addSchema(ProductSuggestionItem)
   app.addSchema(ProductSuggestionsResponse)
   app.addSchema(ProductDimension)

@@ -208,7 +208,11 @@ async function listProductsByKeyword (
       // D67：封面图必填，无图属数据完整性异常。
       throw new Error(`商品 ${row.slug} 缺少封面图，列表无法渲染。`)
     }
-    return toListItem(row, row, coverImage)
+    const item = toListItem(row, row, coverImage)
+    // 命中高亮（#23）按 slug 合并回同一条目：展示字段仍来自 MySQL，顺序仍由搜索端口决定。
+    // 没有片段时不写该字段，前端按原字段渲染。
+    const highlight = result.highlights.get(row.slug)
+    return highlight === undefined ? item : { ...item, highlight }
   })
 
   return {

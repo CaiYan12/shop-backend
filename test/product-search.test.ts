@@ -198,6 +198,68 @@ test('搜索端口的非可用性异常走 500，不被误映射为 503', async 
   search.reset()
 })
 
+interface ListItemHighlight {
+  name?: string[]
+  brand?: string[]
+  model?: string[]
+}
+
+interface HighlightedListItem extends ListItem {
+  highlight?: ListItemHighlight
+}
+
+test('列表项带命中高亮：按 slug 合并回同一条目，命中顺序不变，片段原样透传', async () => {
+  search.reset()
+  // 命中顺序仍由搜索端口决定，高亮只是附加信息。
+  const slugs = ['sony-wh-1000xm3', 'apple-earpods', 'dell-e2210f']
+  search.hits = await productIds(slugs)
+  search.highlights = new Map([
+    ['sony-wh-1000xm3', {
+      name: ['Sony WH-1000XM3 无线<em>降</em><em>噪</em>头戴耳机', '头戴式<em>降噪</em>耳机'],
+      brand: ['<em>Sony</em>'],
+    }],
+    // 只有型号命中的条目：name / brand 必须缺省，而不是空数组。
+    ['dell-e2210f', { model: ['Dell <em>E2210f</em> 22 英寸液晶显示器'] }],
+  ])
+
+  const { status, body } = await list({ keyword: '降噪' })
+  assert.equal(status, 200)
+  assert.deepEqual(slugsOf(body), slugs, '高亮不得改变搜索端口给出的命中顺序')
+
+  const items = body.items as HighlightedListItem[]
+
+  // 字段结构：命中的字段按端口给出的片段数组原样透传（含多个片段的顺序）。
+  assert.deepEqual(items[0]?.highlight, {
+    name: ['Sony WH-1000XM3 无线<em>降</em><em>噪</em>头戴耳机', '头戴式<em>降噪</em>耳机'],
+    brand: ['<em>Sony</em>'],
+  })
+  // 没有命中片段的条目：整个字段不出现（不是空对象）。
+  assert.equal('highlight' in (items[1] ?? {}), false, '无命中片段的条目不应带 highlight 字段')
+  // 字段级缺省：只有 model 命中时 name / brand 不出现（不是空数组）。
+  assert.deepEqual(Object.keys(items[2]?.highlight ?? {}), ['model'])
+  assert.deepEqual(items[2]?.highlight?.model, ['Dell <em>E2210f</em> 22 英寸液晶显示器'])
+
+  // 转义由 ES 完成，路由不得二次转义或改写片段。
+  assert.equal(
+    items[0]?.highlight?.brand?.[0],
+    '<em>Sony</em>',
+    '片段应逐字节透传，路由不做二次转义',
+  )
+
+  // 展示字段仍由 MySQL 补齐：除 highlight 外与 MySQL 路径逐字段一致。
+  const baseline = await list({ pageSize: 50 })
+  assert.equal(baseline.status, 200)
+  const mysqlItems = new Map(baseline.body.items.map((item) => [item.slug, item]))
+  for (const item of items) {
+    const { highlight: _highlight, ...rest } = item
+    const expected = mysqlItems.get(item.slug)
+    assert.ok(expected !== undefined, `MySQL 路径应包含 ${item.slug}`)
+    assert.deepEqual(rest, expected, `${item.slug} 的展示字段应与 MySQL 路径完全一致`)
+  }
+
+  search.reset()
+})
+
 test('关键词 trim 后为空不调用搜索端口，关键请求参数校验先于搜索调用', async () => {
   search.reset()
 

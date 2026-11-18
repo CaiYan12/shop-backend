@@ -20,6 +20,7 @@ import type {
 } from './index-rebuild.ts'
 import {
   SearchUnavailableError,
+  type ProductHighlight,
   type ProductSearchAdapter,
   type ProductSearchQuery,
   type ProductSearchResult,
@@ -194,6 +195,84 @@ const PRODUCT_SUGGEST_FIELDS = [
 /** 联想只用索引内的三个展示字段，不回 MySQL（ADR 0002）。 */
 const PRODUCT_SUGGEST_SOURCE = ['slug', 'name', 'brand']
 
+/** 列表高亮字段（#23）：名称、品牌、型号三个检索文本字段。 */
+const PRODUCT_HIGHLIGHT_FIELDS = ['name', 'brand', 'model'] as const
+
+/** 联想高亮字段（#23）：联想条目只展示名称与品牌，型号不在契约内。 */
+const PRODUCT_SUGGEST_HIGHLIGHT_FIELDS = ['name', 'brand'] as const
+
+/**
+ * 高亮的固定标签（#23）：契约规定命中片段只用不带其它标记的 `<em>` 包裹，
+ * 前端据此只允许这一个标签渲染。
+ */
+const HIGHLIGHT_TAGS = {
+  // encoder: 'html' 先转义原文再插入标签：原文里的 < / > 变成实体，
+  // 响应里唯一真正的标签就是我们插入的 <em>。
+  encoder: 'html' as const,
+  pre_tags: ['<em>'],
+  post_tags: ['</em>'],
+}
+
+/**
+ * 列表高亮配置（#23）：覆盖三个检索文本字段。
+ * `number_of_fragments: 0` 返回整个字段值（而不是摘要片段），
+ * 前端用片段替换原字段渲染，不必担心摘要截断丢字。
+ */
+function buildListHighlight (): SearchRequest['highlight'] {
+  return {
+    ...HIGHLIGHT_TAGS,
+    fields: {
+      name: { number_of_fragments: 0 },
+      brand: { number_of_fragments: 0 },
+      model: { number_of_fragments: 0 },
+    },
+  }
+}
+
+/**
+ * 联想高亮配置（#23）：bool_prefix 的命中落在 search_as_you_type 的子字段上，
+ * 只写根字段会因为 `require_field_match` 是默认值而拿不到任何片段；
+ * 因此用 `matched_fields` 把根字段与 `._index_prefix` 合并，才能标出输入前缀。
+ */
+function buildSuggestHighlight (): SearchRequest['highlight'] {
+  return {
+    ...HIGHLIGHT_TAGS,
+    fields: {
+      name: {
+        number_of_fragments: 0,
+        matched_fields: ['name', 'name._index_prefix'],
+      },
+      brand: {
+        number_of_fragments: 0,
+        matched_fields: ['brand', 'brand._index_prefix'],
+      },
+    },
+  }
+}
+
+type EsHighlight = NonNullable<SearchHit['highlight']>
+
+/**
+ * ES 的 highlight → 端口的高亮（#23）：只保留非空片段数组。
+ * 没有片段、或片段数组为空时返回 undefined——契约要求「字段不出现」，
+ * 不能退化成空数组，更不能补一个空对象。
+ */
+function readHighlight<Field extends string> (
+  highlight: EsHighlight | undefined,
+  fields: readonly Field[],
+): Partial<Record<Field, string[]>> | undefined {
+  if (highlight === undefined) return undefined
+  const result: Partial<Record<Field, string[]>> = {}
+  let matched = false
+  for (const field of fields) {
+    const fragments = highlight[field]
+    if (!Array.isArray(fragments) || fragments.length === 0) continue
+    result[field] = fragments
+    matched = true
+  }
+  return matched ? result : undefined
+}
+
 /**
  * 联想排序（#22）：相关性优先，同分追加 productId 升序。
  * 与关键词搜索同理：ES 默认的平分次序依赖分片内部文档号，重建后会变。
@@ -252,7 +331,8 @@ function buildProductSearchQuery (query: ProductSearchQuery): SearchRequest['que
 }
 
 /**
- * 命中文档只取 productId（ADR 0002）：展示字段一律回 MySQL 补齐。
+ * 命中文档只取 productId 与 slug（ADR 0002）：展示字段一律回 MySQL 补齐，
+ * slug 是高亮合并回条目的键（#23）。
  * 缺 productId 说明索引映射与查询契约不一致，属程序错误，不能映射成「不可用」。
  */
 function readSearchProductId (hit: SearchHit): number {
@@ -265,8 +345,22 @@ function readSearchProductId (hit: SearchHit): number {
 }
 
 /**
+ * 命中文档的 slug（#23）：高亮按 slug 合并回 MySQL 补齐的条目。
+ * 缺 slug 与缺 productId 同类，属索引映射与查询契约不一致。
+ */
+function readSearchHitSlug (hit: SearchHit): string {
+  const source = hit._source as { slug?: unknown } | undefined
+  const value = source?.slug
+  if (typeof value !== 'string') {
+    throw new Error(`搜索命中的文档 ${hit._id ?? ''} 缺少 slug，索引映射与查询契约不一致。`)
+  }
+  return value
+}
+
+/**
  * 联想命中的文档只取 slug / name / brand（ADR 0002）。
  * 缺字段说明索引映射与查询契约不一致，属程序错误，不能映射成「不可用」。
+ * 命中片段（#23）附加在条目的 highlight 上；没有片段时不写该字段。
  */
 function readSuggestionItem (hit: SearchHit): ProductSuggestionItem {
   const source = hit._source as { slug?: unknown, name?: unknown, brand?: unknown } | undefined
@@ -278,7 +372,9 @@ function readSuggestionItem (hit: SearchHit): ProductSuggestionItem {
   ) {
     throw new Error('联想命中的文档 ' + (hit._id ?? '') + ' 缺少 slug / name / brand，索引映射与查询契约不一致。')
   }
-  return { slug: source.slug, name: source.name, brand: source.brand }
+  const item: ProductSuggestionItem = { slug: source.slug, name: source.name, brand: source.brand }
+  const highlight = readHighlight(hit.highlight, PRODUCT_SUGGEST_HIGHLIGHT_FIELDS)
+  return highlight === undefined ? item : { ...item, highlight }
 }
 
 /**
@@ -311,9 +407,11 @@ export class ElasticsearchProductSearchAdapter implements ProductSearchAdapter {
       track_total_hits: true,
       from: (query.page - 1) * query.pageSize,
       size: query.pageSize,
-      _source: ['productId'],
+      // slug 是高亮合并回条目的键（#23），与 productId 一起取。
+      _source: ['productId', 'slug'],
       query: buildProductSearchQuery(query),
       sort: buildProductSearchSort(query.sort),
+      highlight: buildListHighlight(),
     }
 
     let response: SearchResponse
@@ -323,10 +421,21 @@ export class ElasticsearchProductSearchAdapter implements ProductSearchAdapter {
       throw toSearchUnavailable(error)
     }
 
-    const { total } = response.hits
+    const { total, hits } = response.hits
+    const productIds: number[] = []
+    const highlights = new Map<string, ProductHighlight>()
+    for (const hit of hits) {
+      productIds.push(readSearchProductId(hit))
+      // 高亮只是附加信息，不参与排序：productIds 的顺序仍是 ES 返回的顺序。
+      const highlight = readHighlight(hit.highlight, PRODUCT_HIGHLIGHT_FIELDS)
+      if (highlight !== undefined) {
+        highlights.set(readSearchHitSlug(hit), highlight)
+      }
+    }
     return {
       total: typeof total === 'number' ? total : total?.value ?? 0,
-      productIds: response.hits.hits.map(readSearchProductId),
+      productIds,
+      highlights,
     }
   }
 
@@ -347,6 +456,7 @@ export class ElasticsearchProductSearchAdapter implements ProductSearchAdapter {
         },
       },
       sort: PRODUCT_SUGGEST_SORT,
+      highlight: buildSuggestHighlight(),
     }
 
     let response: SearchResponse
