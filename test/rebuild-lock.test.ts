@@ -1,148 +1,190 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer, type Server } from 'node:net'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  acquireRebuildLock,
-  defaultRebuildLockPath,
+  DEFAULT_REBUILD_LOCK_PORT,
+  REBUILD_LOCK_PORT_ENV,
   RebuildLockError,
+  acquireRebuildLock,
+  defaultRebuildLockOwnerPath,
+  defaultRebuildLockPort,
   type RebuildLockOwner,
-  type RebuildLockProcessProbe,
 } from '../src/search/rebuild-lock.ts'
+import { freePort } from './helpers/free-port.ts'
 
 /**
- * 重建互斥锁（第三轮复审）：默认套件不依赖 Elasticsearch，
- * 用临时目录与注入的进程探针覆盖持有、接管与释放。
+ * 重建互斥（第四轮复审）：互斥是操作系统持有的回环端口。
+ * 默认套件不依赖 Elasticsearch；用临时目录与高位空闲端口覆盖持有、释放与身份记录。
  */
 
 const DIR = mkdtempSync(join(tmpdir(), 'shop-rebuild-lock-test-'))
 after(() => rmSync(DIR, { recursive: true, force: true }))
 
-const deadProbe: RebuildLockProcessProbe = {
-  isAlive: () => false,
-  processInfo: () => null,
+function ownerPath (name: string): string {
+  return join(DIR, name)
 }
 
-function lockRecord (pid: number, startTime: string, execPath: string, token = 'stale-token'): RebuildLockOwner {
-  return {
-    pid,
-    startTime,
-    execPath,
-    acquiredAt: '2020-01-01T00:00:00.000Z',
-    token,
-  }
+function listenExternal (port: number): Promise<Server> {
+  return new Promise((resolve, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen({ host: '127.0.0.1', port }, () => resolve(server))
+  })
 }
 
-function writeLock (path: string, record: RebuildLockOwner): void {
-  writeFileSync(path, JSON.stringify(record, null, 2) + '\n', 'utf8')
+function closeServer (server: Server): Promise<void> {
+  return new Promise((resolve) => server.close(() => resolve()))
 }
 
-test('默认锁文件按仓库根解析，不依赖 cwd', () => {
-  const expected = fileURLToPath(new URL('../.run/es-rebuild.lock', import.meta.url))
-  assert.equal(defaultRebuildLockPath(), expected)
-  assert.equal(isAbsolute(defaultRebuildLockPath()), true)
-  assert.equal(defaultRebuildLockPath().endsWith(join('.run', 'es-rebuild.lock')), true)
+test('默认互斥端口 19201，身份记录按仓库根解析，不依赖 cwd', () => {
+  assert.equal(DEFAULT_REBUILD_LOCK_PORT, 19201)
+  assert.equal(defaultRebuildLockPort({}), 19201)
+  assert.equal(defaultRebuildLockPort({ [REBUILD_LOCK_PORT_ENV]: ' 23456 ' }), 23456)
+  assert.throws(
+    () => defaultRebuildLockPort({ [REBUILD_LOCK_PORT_ENV]: '9201.5' }),
+    (error: unknown) => {
+      assert.ok(error instanceof RebuildLockError)
+      assert.match(error.message, /1–65535/)
+      return true
+    },
+  )
+  const expected = fileURLToPath(new URL('../.run/es-rebuild.owner.json', import.meta.url))
+  assert.equal(defaultRebuildLockOwnerPath(), expected)
+  assert.equal(isAbsolute(defaultRebuildLockOwnerPath()), true)
+  assert.equal(defaultRebuildLockOwnerPath().endsWith(join('.run', 'es-rebuild.owner.json')), true)
 })
 
-test('释放后可以再次获取：锁文件随获取出现、随释放删除', () => {
-  const path = join(DIR, 'release.lock')
-  const first = acquireRebuildLock({ lockPath: path })
-  assert.equal(existsSync(path), true)
-  assert.equal(first.owner.pid, process.pid)
+test('同一端口第二次获取立即失败：消息含端口与 netstat 排查命令', async () => {
+  const port = await freePort()
+  const first = await acquireRebuildLock({ port, ownerPath: ownerPath('held.owner.json') })
+  try {
+    await assert.rejects(
+      acquireRebuildLock({ port, ownerPath: ownerPath('held-second.owner.json') }),
+      (error: unknown) => {
+        assert.ok(error instanceof RebuildLockError)
+        assert.equal(error.port, port)
+        assert.ok(error.message.includes('127.0.0.1:' + String(port)), '必须指出被占用的端口')
+        assert.ok(
+          error.message.includes('netstat -ano | findstr :' + String(port)),
+          '必须给出排查命令',
+        )
+        assert.match(error.message, /已有一次索引重建在运行/)
+        return true
+      },
+    )
+  } finally {
+    await first.release()
+  }
+})
 
-  first.release()
+test('释放后端口立即可以再次获取，身份记录随释放删除', async () => {
+  const port = await freePort()
+  const path = ownerPath('release.owner.json')
+  const first = await acquireRebuildLock({ port, ownerPath: path })
+  assert.equal(existsSync(path), true)
+
+  await first.release()
   assert.equal(existsSync(path), false)
 
-  const second = acquireRebuildLock({ lockPath: path })
+  const second = await acquireRebuildLock({ port, ownerPath: path })
   try {
     assert.equal(existsSync(path), true)
-    assert.notEqual(second.owner.token, first.owner.token, '每次获取都应有独立标记')
   } finally {
-    second.release()
+    await second.release()
   }
   assert.equal(existsSync(path), false)
 })
 
-test('持有中再次获取立即失败：提示持有者与锁文件位置', () => {
-  const path = join(DIR, 'held.lock')
-  const lock = acquireRebuildLock({ lockPath: path })
+test('端口被外部监听时获取失败：不写身份记录，外部监听结束后可再获取', async () => {
+  const port = await freePort()
+  const external = await listenExternal(port)
+  const path = ownerPath('external.owner.json')
   try {
-    assert.throws(() => acquireRebuildLock({ lockPath: path }), (error: unknown) => {
+    await assert.rejects(acquireRebuildLock({ port, ownerPath: path }), (error: unknown) => {
       assert.ok(error instanceof RebuildLockError)
-      assert.equal(error.lockPath, path)
-      assert.ok(error.message.includes(path), '必须指出锁文件位置')
-      assert.ok(error.message.includes(`pid=${process.pid}`), '必须指出持锁进程')
-      assert.match(error.message, /已被当前进程持有/)
+      assert.equal(error.port, port)
+      assert.match(error.message, /已被占用/)
       return true
     })
+    assert.equal(existsSync(path), false, '绑定失败不得写身份记录')
   } finally {
-    lock.release()
+    await closeServer(external)
   }
-  assert.equal(existsSync(path), false)
+
+  const after = await acquireRebuildLock({ port, ownerPath: path })
+  await after.release()
 })
 
-test('持有者已消失：视为过期，清理后接管', () => {
-  const path = join(DIR, 'stale.lock')
-  writeLock(path, lockRecord(424242, '2020-01-01T00:00:00.000Z', 'C:\\dead\\node.exe'))
-
-  const lock = acquireRebuildLock({ lockPath: path, probe: deadProbe })
+test('身份记录包含 pid / 启动时间 / 可执行路径 / 端口 / 获取时间', async () => {
+  const port = await freePort()
+  const path = ownerPath('identity.owner.json')
+  const lock = await acquireRebuildLock({
+    port,
+    ownerPath: path,
+    now: () => Date.parse('2026-11-18T00:00:00.000Z'),
+  })
   try {
     const record = JSON.parse(readFileSync(path, 'utf8')) as RebuildLockOwner
-    assert.equal(record.pid, process.pid, '锁内容应换成当前进程')
-    assert.notEqual(record.token, 'stale-token')
-    assert.equal(lock.recoveredFrom?.pid, 424242, '应报告被清理的过期持有者')
+    assert.equal(record.pid, process.pid)
+    assert.equal(record.port, port)
+    assert.equal(record.execPath, process.execPath)
+    assert.equal(record.startTime, lock.owner.startTime)
+    assert.equal(record.acquiredAt, '2026-11-18T00:00:00.000Z')
   } finally {
-    lock.release()
+    await lock.release()
   }
   assert.equal(existsSync(path), false)
 })
 
-test('PID 仍存活但启动时间不同（PID 被复用）：按过期处理并接管', () => {
-  const path = join(DIR, 'reused-pid.lock')
-  writeLock(path, lockRecord(424242, '2020-01-01T00:00:00.000Z', process.execPath))
-  const probe: RebuildLockProcessProbe = {
-    isAlive: () => true,
-    processInfo: () => ({ startTime: '2026-01-01T00:00:00.000Z', execPath: process.execPath }),
-  }
-
-  const lock = acquireRebuildLock({ lockPath: path, probe })
+test('身份记录写失败不影响互斥：仍持有端口，释放不抛错', async () => {
+  const port = await freePort()
+  // 用已存在的目录当记录路径：写文件必然失败（EISDIR）。
+  const lock = await acquireRebuildLock({ port, ownerPath: DIR })
   try {
-    assert.equal(JSON.parse(readFileSync(path, 'utf8')).pid, process.pid)
+    assert.ok(lock.ownerRecordWarning !== undefined, '应记录写失败的原因')
+    assert.match(lock.ownerRecordWarning ?? '', /写入失败/)
+    await assert.rejects(
+      acquireRebuildLock({ port, ownerPath: ownerPath('other.owner.json') }),
+      (error: unknown) => {
+        assert.ok(error instanceof RebuildLockError)
+        assert.equal(error.port, port)
+        return true
+      },
+    )
   } finally {
-    lock.release()
-  }
-})
-
-test('持有者仍存活且身份一致：立即失败并给出持有者信息', () => {
-  const path = join(DIR, 'alive.lock')
-  writeLock(path, lockRecord(424242, '2020-01-01T00:00:00.000Z', process.execPath))
-  const probe: RebuildLockProcessProbe = {
-    isAlive: () => true,
-    processInfo: () => ({ startTime: '2020-01-01T00:00:00.000Z', execPath: process.execPath }),
+    await lock.release()
   }
 
-  assert.throws(() => acquireRebuildLock({ lockPath: path, probe }), (error: unknown) => {
-    assert.ok(error instanceof RebuildLockError)
-    assert.ok(error.message.includes('pid=424242'))
-    assert.ok(error.message.includes(path))
-    assert.match(error.message, /已被占用/)
-    return true
-  })
-  assert.equal(existsSync(path), true, '失败时不得删除仍有效的锁')
+  const again = await acquireRebuildLock({ port, ownerPath: ownerPath('after-warning.owner.json') })
+  await again.release()
 })
 
-test('锁文件损坏：立即失败并提示人工确认后删除', () => {
-  const path = join(DIR, 'corrupt.lock')
-  writeFileSync(path, '{ 这不是 JSON', 'utf8')
+test('已存在的旧身份记录不参与互斥：直接取得端口并覆盖记录', async () => {
+  const port = await freePort()
+  const path = ownerPath('stale.owner.json')
+  writeFileSync(
+    path,
+    JSON.stringify({
+      pid: 424242,
+      startTime: '2020-01-01T00:00:00.000Z',
+      execPath: 'C:\\dead\\node.exe',
+      port: 19999,
+      acquiredAt: '2020-01-01T00:00:00.000Z',
+    }),
+    'utf8',
+  )
 
-  assert.throws(() => acquireRebuildLock({ lockPath: path }), (error: unknown) => {
-    assert.ok(error instanceof RebuildLockError)
-    assert.ok(error.message.includes(path))
-    assert.match(error.message, /内容无法解析/)
-    assert.match(error.message, /删除该文件再重试/)
-    return true
-  })
-  assert.equal(existsSync(path), true, '损坏的锁不擅自删除')
+  const lock = await acquireRebuildLock({ port, ownerPath: path })
+  try {
+    const record = JSON.parse(readFileSync(path, 'utf8')) as RebuildLockOwner
+    assert.equal(record.pid, process.pid, '旧记录应被直接覆盖，不经判断/接管')
+    assert.equal(record.port, port)
+  } finally {
+    await lock.release()
+  }
+  assert.equal(existsSync(path), false)
 })

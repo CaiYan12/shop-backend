@@ -719,3 +719,50 @@ BM25 的名称长度差异会决定同品牌商品的先后，下表同时列出
 - 锁只保证同一台机器的同一锁文件路径互斥；跨机器 / 共享文件系统不保证（依赖文件系统原子语义）。
 - 默认探针只读取当前进程的启动时间与可执行路径；其它 PID 仅校验存活，PID 被复用且新进程仍存活时会保守拒绝接管，需人工确认后删除锁文件。
 - 别名唯一目标不变式是第二道防线：跨机器并发仍可能在两次 add 之间短暂出现双目标，收敛后恢复；不能替代互斥。
+
+## 17. 第四轮复审：端口互斥、发布后静默与残余风险（2026-11-18）
+
+采集日期：2026-11-18（Asia/Shanghai）。ES 9.5.6 在线（`127.0.0.1:9201`）。§16 的 191 / 31 是上一轮快照，不改写。
+
+### 17.1 修复
+
+- 互斥改用绑定本机回环端口（默认 19201，`ES_REBUILD_LOCK_PORT` 覆盖）：`EADDRINUSE` 立即失败，消息含端口与 `netstat -ano | findstr :<port>`；进程退出由操作系统释放，不再有「读文件判过期再接管」。
+- `.run/es-rebuild.owner.json` 仅作诊断身份记录（pid / 启动时间 / 可执行路径 / 端口 / acquiredAt），写失败不影响互斥；旧记录直接覆盖。
+- `switchAttempted` 为真时任何异常路径都不删除新索引（含回滚成功后、含切换后复查抛错）；只有从未尝试切换才允许清理自己创建的索引。
+- 建前收敛 + 发布后静默窗口（默认 5000 ms，最多 3 轮）：`settleAliasExclusiveTarget` 导出，只改别名不删索引。
+- `action_results` 按真实 ES 对象数组解析，错误含动作、索引与状态码。
+
+### 17.2 验证数字
+
+| 项 | 结果 |
+|---|---|
+| `pnpm test` | **198 通过 / 0 失败**（27.0 s；基线 191 + 5 条收敛/静默/清理用例 + 2 条适配器用例；文件锁 7 条旧用例由端口互斥 7 条替换） |
+| `pnpm test:es` | **32 通过 / 0 失败**（9.9 s；真实 ES 9.5.6，基线 31 + 1 条真实收敛用例） |
+| 真实 ES 并发重建 | `test-es/rebuild-lock-e2e.test.ts`：第二个重建因 `EADDRINUSE` 立即失败，别名唯一，HTTP 关键词列表 slug 无重复 |
+| 真实 ES 收敛 | `test-es/rebuild-settle-e2e.test.ts`：双目标别名收敛为单目标；收敛只改别名，两个隔离索引都在；演示别名 `products` 前后一致 |
+| 演示别名 | 探针前后 `products` 都是 `["products_v5"]`；隔离索引/别名清理后为空 |
+
+### 17.3 真实 ES 收敛函数实测
+
+`.run/v26-settle-probe.mjs`（2026-11-18）用真实适配器在隔离命名空间直接调用 `settleAliasExclusiveTarget`：
+
+```text
+前置别名 -> ["products_es_test_probe_settle_v1","products_es_test_probe_settle_v2"]
+[es:rebuild] 别名 products_es_test_probe_settle_alias 同时指向 products_es_test_probe_settle_v1、products_es_test_probe_settle_v2，收敛为唯一目标 products_es_test_probe_settle_v2
+收敛结果 -> {"target":"products_es_test_probe_settle_v2","targets":["products_es_test_probe_settle_v2"],"rounds":2,"removed":["products_es_test_probe_settle_v1"]}
+收敛后别名 -> ["products_es_test_probe_settle_v2"]
+被移除目标仍存在 -> products_es_test_probe_settle_v1 true
+演示别名 products 前后一致 -> true ["products_v5"]
+清理后测试别名 -> []
+清理后测试索引 -> products_es_test_probe_settle_v1 false | products_es_test_probe_settle_v2 false
+```
+
+`rounds: 2` 表示「静默 50 ms → 复查发现双目标 → 收敛 → 再静默 50 ms → 复查唯一」；`removed` 只含多余目标，没有删除任何索引。
+
+### 17.4 残余风险与未覆盖项
+
+- 静默窗口结束、互斥释放之后才落地的切换请求仍可能造成短暂双目标。
+- 检测：每次重建开始前的建前收敛；自愈：收敛到版本号最大的现存索引，发布后静默窗口再收敛一次。
+- 固有原因：ES 别名 API 没有条件更新 / 比较并交换，`_aliases` 是一组独立 add/remove，不校验旧集合也没有版本号；本机端口互斥无法约束其它机器。
+- 端口互斥只覆盖同一台机器的同一端口；两台机器各自默认 19201 仍可并发。
+- 身份记录只是诊断，不提供额外互斥。
