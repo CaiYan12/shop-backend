@@ -4,6 +4,7 @@
 > 对应工单 #19（Phase 4-01），决策依据 C47 / C59 / C60 与台账 §8；
 > §7–§9 的索引映射与全量重建实测对应工单 #20（Phase 4-02），决策依据 C62 / D74 与 ADR 0003。
 > §11 的商品联想实测对应工单 #22（Phase 4-04），决策依据 D74 与 ADR 0002 / 0003。
+> §13 的客户端超时与降级冷却实测（V19）对应工单 #24（Phase 4-06）。
 > 下文所有数值均为**实测**；推论与未测项单独标注。
 
 ## 1. 环境前提
@@ -365,7 +366,7 @@ QUERY_OK=100 QUERY_BAD=0
 | V14 安装目录 / 数据目录 / 日志目录分项占用 | **已测量**（§9）：≈984.2 MiB / 0.24–0.33 MiB / 1.23–1.41 MiB |
 | V11 商品联想五类输入 | **已验证**（§11）：单字 / 半词 / 品牌前缀符合预期；完整词与型号前缀有额外召回，原因见 §11 |
 | 高亮转义与联想前缀标记（#23） | **已验证**（§12）：真机返回 `&lt;b&gt;x&lt;&#x2F;b&gt;`，`<em>` 是唯一标签；联想前缀需 `matched_fields` 指向 `._index_prefix` |
-| 关键词搜索耗时与降级冷却 | 读路径已由 #21 落地（本文件未记录耗时）；**5 秒冷却窗口未做**，#24 范围 |
+| 关键词搜索耗时与降级冷却 | **已验证**（§13）：故障时首个请求 23 ms（连接被拒）/ 3,472.7–3,502.3 ms（连接挂起，受 3 s 上限约束）；冷却窗口内 0.3–0.4 ms |
 | 重启机器后 ES 是否可用 | 未验证；ES 不会开机自启，需 `start.bat` 或 `node scripts/es-dev.mjs` 拉起 |
 | 并发启动两个 `start.bat` | 未验证。设计上第二个会走复用路径，但没有做并发压测 |
 
@@ -456,4 +457,56 @@ Sony <b>x</b> 无线降噪头戴耳机 <script>alert(1)</script>
 - **已知偏差**：`._index_prefix` 是边向前缀，覆盖范围会连带标记后面的词（`AirP` 标成 `AirPods Max 头`）；
   属该子字段行为，如实记录，不在本票收紧。
 - 临时索引已删除：脚本末尾 `DELETE`，输出 `PROBE_INDEX_DELETED=highlight-probe`。
+
+## 13. V19 · 客户端超时、重试与降级冷却实测（#24）
+
+采集日期：2026-11-18（Asia/Shanghai；下表 `startedAt` 为脚本输出的 UTC 时刻）。
+环境：ES 9.5.6 在线（`127.0.0.1:9201`）、Node.js v26.13.1、`@elastic/elasticsearch@9.5.1`。
+
+测量方式：`.run/v19-timeout.mjs` 与 `.run/v19-healthy.mjs`（临时脚本，`.run/` 已 gitignore，不提交）。
+两个脚本都用**生产同款装配**：`createElasticsearchClient({ node, requestTimeout, maxRetries: 0 })` →
+`ElasticsearchProductSearchAdapter` → `createApp`（冷却默认 5 s、真实时钟），经 `app.inject` 打 HTTP，
+用 `process.hrtime.bigint()` 记墙钟。数值含 Fastify 与路由开销，是实测值而非额定值。
+
+### 13.1 客户端参数核对（以安装版本的 `.d.ts` 为准）
+
+| 项 | 结论 | 出处 |
+|---|---|---|
+| `requestTimeout` | `ClientOptions.requestTimeout?: number`，默认「无超时」 | `@elastic/elasticsearch@9.5.1` `lib/client.d.ts` |
+| `maxRetries` | `ClientOptions.maxRetries?: number`，默认 3 | 同上 |
+| 连接超时 | **没有独立的连接超时参数**。`ClientOptions` 只有 `requestTimeout` / `maxRetries` / `pingTimeout`；`pingTimeout` 是连接池 ping 死节点的等待时刻，不是建连超时 | 同上 |
+| `requestTimeout` 的作用面 | 客户端把它同时当作连接的默认 `timeout`（`client.js`：`const { … requestTimeout: timeout, … }` → `ConnectionOptions.timeout`），并在每个请求上再传一次（`Transport.js`：`timeout = options.requestTimeout ?? this[kRequestTimeout]`）；`UndiciConnection` 用它设池的 `headersTimeout` / `bodyTimeout` | `@elastic/elasticsearch@9.5.1` `lib/client.js`、`@elastic/transport@9.4.1` `lib/Transport.js` / `lib/connection/UndiciConnection.js` |
+| `agent` 可配项 | `UndiciAgentOptions` 只有 `keepAliveTimeout` / `keepAliveMaxTimeout` / `keepAliveTimeoutThreshold` / `pipelining` / `maxHeaderSize` / `connections`，**不含 `connectTimeout`**；`@elastic/transport@9.4.1` 全库（`.d.ts` 与 `.js`）搜不到 `connectTimeout` | `@elastic/transport@9.4.1` `lib/types.d.ts` |
+
+因此在线路径的配置只有两项：`requestTimeout: 3000`、`maxRetries: 0`（`src/server.ts`）。
+建连阶段没有单独参数可调，实际由 `requestTimeout` 兜住——由下表第 4/7/8 行证明。
+
+### 13.2 实测
+
+「窗口内」指首个失败请求之后的 5 s 冷却窗口内（同一应用实例、真实时钟）。
+
+| # | 场景 | 请求 | HTTP | 业务码 | 耗时 | `startedAt`（UTC） |
+|---|---|---|---:|---|---:|---|
+| 1 | 连接被拒（`127.0.0.1:9202`，无监听） | 关键词·首个失败请求 | 503 | `SEARCH_NOT_AVAILABLE` | **23.0 ms** | 2026-11-18T03:18:33.201Z |
+| 2 | 同上 | 关键词·窗口内第二个请求 | 503 | `SEARCH_NOT_AVAILABLE` | **0.4 ms** | 03:18:33.225Z |
+| 3 | 同上 | 联想·窗口内请求 | 503 | `SEARCH_NOT_AVAILABLE` | **0.4 ms** | 03:18:33.226Z |
+| 4 | 连接挂起（`10.255.255.1:9201`，不可路由）·上限 3 s（第 1 次） | 关键词·首个失败请求 | 503 | `SEARCH_NOT_AVAILABLE` | **3,472.7 ms** | 03:18:33.248Z |
+| 5 | 同上（第 1 次） | 关键词·窗口内第二个请求 | 503 | `SEARCH_NOT_AVAILABLE` | **0.3 ms** | 03:18:36.721Z |
+| 6 | 同上（第 1 次） | 联想·窗口内请求 | 503 | `SEARCH_NOT_AVAILABLE` | **0.3 ms** | 03:18:36.721Z |
+| 7 | 连接挂起·上限 3 s（第 2 次） | 关键词·首个失败请求 | 503 | `SEARCH_NOT_AVAILABLE` | **3,502.3 ms** | 03:18:36.773Z |
+| 8 | 连接挂起·上限 **1 s**（对照，验证上限来源） | 关键词·首个失败请求 | 503 | `SEARCH_NOT_AVAILABLE` | **1,500.7 ms** | 03:18:40.304Z |
+| 9 | ES 在线（对照） | 关键词·正常查询 | 200 | — | 66.5 ms | 03:18:52.361Z |
+| 10 | ES 在线（对照） | 联想·正常查询 | 200 | — | 13.1 ms | 03:18:52.429Z |
+
+判读：
+
+- **冷却窗口内的请求不含连接等待**：0.3–0.4 ms，与首个失败请求的 23 ms（连接被拒）或 3,472.7 ms（连接挂起）差三个数量级以上。
+  原因是窗口内根本不进适配器，也就不进 HTTP 客户端。
+- **建连挂起受 `requestTimeout` 约束**：上限 3 s 时两次实测 3,472.7 ms 与 3,502.3 ms；
+  同一地址把上限降到 1 s 时实测 1,500.7 ms。三者都等于「上限 + 约 0.47–0.50 s」，
+  偏差是固定的中止开销、不随上限放大——若实际由 undici 默认连接超时（10 s）决定，1 s 的对照不会变成 1.5 s。
+- **没有重试**：3 s 上限下失败耗时约 3.5 s 而不是 7 s 或 10 s，与 `maxRetries: 0` 一致。
+- **正常查询与故障耗时不是一个量级**：在线关键词 66.5 ms、联想 13.1 ms（当时别名 `products` 命中 4 件）。
+- 数值受机器负载影响（当时 ES 常驻约 0.9 GB、可用物理内存偏低）；上表是单次实测，不是额定区间。
+
 

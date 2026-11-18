@@ -4,6 +4,7 @@ import { createDb, createPool, type Database } from '../../src/db/client.ts'
 import { runMigrations } from '../../src/db/migrate.ts'
 import { seedDatabase } from '../../src/db/seed.ts'
 import type { ProductSearchAdapter } from '../../src/search/product-search.ts'
+import type { SearchCooldownOptions } from '../../src/search/search-cooldown.ts'
 import { FakeProductSearchAdapter } from './fake-search-adapter.ts'
 import { loadTestConfig } from './test-config.ts'
 
@@ -22,6 +23,8 @@ export interface SeededApp {
 export interface CreateSeededAppOptions {
   /** 搜索端口；缺省注入假实现，因此默认套件不依赖 Elasticsearch。 */
   search?: ProductSearchAdapter
+  /** 搜索降级冷却（#24）：窗口长度与时钟；缺省用生产默认（5 s + Date.now）。 */
+  searchCooldown?: SearchCooldownOptions
 }
 
 /**
@@ -37,7 +40,7 @@ export async function createSeededApp (options: CreateSeededAppOptions = {}): Pr
     const db = createDb(pool)
     await runMigrations(db)
     await seedDatabase(db)
-    const app = await createApp({ db, config, search })
+    const app = await createApp({ db, config, search, searchCooldown: options.searchCooldown })
     await app.ready()
     return { pool, db, app, search }
   } catch (error) {

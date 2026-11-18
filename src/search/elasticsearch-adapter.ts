@@ -34,6 +34,8 @@ export interface ElasticsearchClientOptions {
   node: string
   /** 重建比在线查询宽松：默认 30 s，且不自动重试，避免 bulk 被重放。 */
   requestTimeout?: number
+  /** 每个请求的最大重试次数；默认 0（不重试），在线查询显式传 0（#24、V19）。 */
+  maxRetries?: number
 }
 
 /** 重建专用客户端：显式超时、禁用自动重试。 */
@@ -41,7 +43,7 @@ export function createElasticsearchClient (options: ElasticsearchClientOptions):
   return new Client({
     node: options.node,
     requestTimeout: options.requestTimeout ?? 30_000,
-    maxRetries: 0,
+    maxRetries: options.maxRetries ?? 0,
   })
 }
 
