@@ -35,6 +35,7 @@ pnpm start          # 运行 dist/server.js（默认 3001）
 pnpm dev            # node --watch 直接运行 src/server.ts
 pnpm type-check     # tsc -p tsconfig.json
 pnpm test           # node --test（重建 shop_homework_test 后跑全部测试）
+pnpm test:es        # 真实 ES 验收（隔离 products_es_test* 索引与别名；ES 不可达时非零退出）
 pnpm db:create      # 建库（首次部署必须先于 db:migrate）
 pnpm db:generate    # 由 schema 生成迁移（手写迁移须同步补 meta 快照）
 pnpm db:migrate     # 应用迁移（重复执行为 no-op）

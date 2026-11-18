@@ -391,20 +391,31 @@ function toSearchUnavailable (error: unknown): Error {
   return new SearchUnavailableError('搜索服务暂时不可用。', { cause: error })
 }
 
+export interface ElasticsearchProductSearchOptions {
+  /**
+   * 对外别名（ADR 0003）：默认 `products`。
+   * `pnpm test:es` 传入隔离的测试别名（#25），绝不读写演示别名。
+   */
+  alias?: string
+}
+
 /**
  * 在线搜索适配器（#21）：把端口上的结构化条件翻译成 ES 请求。
- * 对外只认别名 `products`（ADR 0003），不直接指向物理索引。
+ * 默认只认别名 `products`（ADR 0003），不直接指向物理索引；
+ * 别名可由调用方覆盖，供隔离的 ES 验收测试使用（#25）。
  */
 export class ElasticsearchProductSearchAdapter implements ProductSearchAdapter {
   private readonly client: Client
+  private readonly alias: string
 
-  constructor (client: Client) {
+  constructor (client: Client, options: ElasticsearchProductSearchOptions = {}) {
     this.client = client
+    this.alias = options.alias ?? PRODUCTS_ALIAS
   }
 
   async search (query: ProductSearchQuery): Promise<ProductSearchResult> {
     const request: SearchRequest = {
-      index: PRODUCTS_ALIAS,
+      index: this.alias,
       // D60：总数必须精确，不能被相关性阈值截断成 10000+。
       track_total_hits: true,
       from: (query.page - 1) * query.pageSize,
@@ -447,7 +458,7 @@ export class ElasticsearchProductSearchAdapter implements ProductSearchAdapter {
    */
   async suggest (query: ProductSuggestionQuery): Promise<ProductSuggestionResult> {
     const request: SearchRequest = {
-      index: PRODUCTS_ALIAS,
+      index: this.alias,
       size: query.limit,
       _source: PRODUCT_SUGGEST_SOURCE,
       query: {
