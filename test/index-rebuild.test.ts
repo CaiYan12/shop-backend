@@ -7,6 +7,7 @@ import {
   AliasExclusivityError,
   IndexRebuildError,
   rebuildProductIndex,
+  selectAliasRestoreTarget,
   settleAliasExclusiveTarget,
 } from '../src/search/index-rebuild.ts'
 import { RebuildLockError } from '../src/search/rebuild-lock.ts'
@@ -737,6 +738,7 @@ test('回滚把别名撤空时立即恢复旧索引，并在消息里说明已�
   await assert.rejects(run(adapter), (error: unknown) => {
     assert.ok(error instanceof IndexRebuildError)
     assert.match(error.message, /模拟的回滚响应丢失/)
+    assert.match(error.message, /恢复为现存旧索引 products_v1/)
     assert.match(error.message, /已恢复别名，避免零目标/)
     assert.match(error.message, /别名 products_test 当前指向 products_v1/)
     return true
@@ -748,6 +750,189 @@ test('回滚把别名撤空时立即恢复旧索引，并在消息里说明已�
     '零目标必须立即恢复为旧索引',
   )
   assert.equal(adapter.indices.has('products_v2'), true, '新索引仍按规则保留')
+})
+
+/**
+ * 模拟真实 ES：add 一个不存在的物理索引会报 index_not_found。
+ * 同时允许在冒烟查询时模拟外部进程删除索引并撤空别名（P1 第六轮复审的复现条件）。
+ */
+class MissingIndexAwareAliasAdapter extends RecordingProductIndexAdapter {
+  externalWipe?: { indices: string[], alias: string }
+  successfulAdds: string[][] = []
+
+  override async updateAlias (alias: string, add: string[], remove: string[]): Promise<void> {
+    this.steps.push({ name: 'updateAlias', alias, add: [...add], remove: [...remove] })
+    const missing = add.filter((index) => !this.indices.has(index))
+    if (missing.length > 0) {
+      throw new Error(`模拟的 index_not_found_exception：${missing.join('、')}`)
+    }
+    const targets = this.aliases.get(alias) ?? new Set<string>()
+    for (const index of remove) targets.delete(index)
+    for (const index of add) targets.add(index)
+    if (targets.size === 0) this.aliases.delete(alias)
+    else this.aliases.set(alias, targets)
+    if (add.length > 0) this.successfulAdds.push([...add])
+  }
+
+  override async searchTotal (index: string): Promise<number> {
+    const wipe = this.externalWipe
+    if (wipe !== undefined) {
+      this.externalWipe = undefined
+      for (const name of wipe.indices) this.indices.delete(name)
+      this.aliases.delete(wipe.alias)
+      return 0
+    }
+    return super.searchTotal(index)
+  }
+}
+
+test('恢复分支：旧索引已被外部删除时恢复新索引，不再 add 已删除的旧索引', async () => {
+  const adapter = new MissingIndexAwareAliasAdapter()
+  await run(adapter)
+  adapter.steps.length = 0
+  adapter.successfulAdds.length = 0
+  // 外部进程：撤空别名并删掉旧索引；新索引仍然存在。
+  adapter.externalWipe = { indices: ['products_v1'], alias: ALIAS }
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /冒烟查询没有命中/)
+    assert.match(error.message, /旧索引 products_v1 已不存在/)
+    assert.match(error.message, /恢复为新索引 products_v2/)
+    assert.match(error.message, /已恢复别名，避免零目标/)
+    assert.match(error.message, /别名 products_test 当前指向 products_v2/)
+    return true
+  })
+
+  assert.deepEqual(
+    [...(adapter.aliases.get(ALIAS) ?? [])],
+    ['products_v2'],
+    '别名必须恢复到仍然存在的新索引',
+  )
+  assert.deepEqual(
+    adapter.successfulAdds,
+    [['products_v2'], ['products_v2']],
+    '只有切换与恢复两次成功 add，且都只 add 现存的新索引',
+  )
+  assert.equal(
+    adapter.steps.filter(
+      (step) => step.name === 'updateAlias' && step.add.includes('products_v1'),
+    ).length,
+    1,
+    '只允许回滚尝试 add 已删除的旧索引，恢复不得再次 add 它',
+  )
+  assert.equal(adapter.indices.has('products_v2'), true, '新索引必须保留')
+})
+
+/**
+ * 回滚只生效了 remove 新索引、add 旧索引未落地（别名被撤空），
+ * 且此时 listProductIndices 抛错：无法确认旧索引是否还在，直接恢复新索引。
+ */
+class ListFailureOnRecoveryAdapter extends RecordingProductIndexAdapter {
+  failList = false
+  armed = false
+
+  override async updateAlias (alias: string, add: string[], remove: string[]): Promise<void> {
+    if (this.failList && add.includes('products_v1') && remove.includes('products_v2')) {
+      await super.updateAlias(alias, [], remove)
+      throw new Error('模拟的回滚响应丢失')
+    }
+    await super.updateAlias(alias, add, remove)
+  }
+
+  override async listProductIndices (): Promise<string[]> {
+    if (this.failList) {
+      this.steps.push({ name: 'listProductIndices' })
+      throw new Error('模拟的索引列表查询失败')
+    }
+    return super.listProductIndices()
+  }
+
+  override async searchTotal (index: string): Promise<number> {
+    if (!this.armed) return super.searchTotal(index)
+    this.failList = true
+    return 0
+  }
+}
+
+test('恢复分支：listProductIndices 抛错时视为无法确认，恢复新索引', async () => {
+  const adapter = new ListFailureOnRecoveryAdapter()
+  await run(adapter)
+  adapter.armed = true
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /模拟的回滚响应丢失/)
+    assert.match(error.message, /模拟的索引列表查询失败/)
+    assert.match(error.message, /无法确认旧索引是否仍存在/)
+    assert.match(error.message, /恢复为新索引 products_v2/)
+    assert.match(error.message, /已恢复别名，避免零目标/)
+    return true
+  })
+
+  assert.deepEqual(
+    [...(adapter.aliases.get(ALIAS) ?? [])],
+    ['products_v2'],
+    '无法确认旧索引时必须恢复本进程刚创建的新索引',
+  )
+  assert.equal(
+    adapter.steps.filter(
+      (step) => step.name === 'updateAlias' && step.add.includes('products_v1'),
+    ).length,
+    1,
+    '只允许失败的回滚尝试 add 旧索引',
+  )
+})
+
+test('恢复分支：恢复目标全不存在时消息写明无可用恢复目标，不抛未捕获异常', async () => {
+  const adapter = new MissingIndexAwareAliasAdapter()
+  await run(adapter)
+  adapter.steps.length = 0
+  // 外部进程把旧索引和新索引都删掉，别名也被撤空。
+  adapter.externalWipe = { indices: ['products_v1', 'products_v2'], alias: ALIAS }
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /无可用恢复目标/)
+    assert.doesNotMatch(error.message, /恢复失败/)
+    return true
+  })
+
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], [], '没有可用目标时保持现场，等人工处理')
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'deleteIndex' && step.index === 'products_v2'),
+    false,
+    '尝试过切换后不得删除新索引',
+  )
+})
+
+test('恢复目标选择：多个现存旧索引时取版本号最大的，并说明缺失的旧索引', async () => {
+  const adapter = new RecordingProductIndexAdapter()
+  await adapter.createIndex('products_v7')
+  await adapter.createIndex('products_v9')
+  await adapter.createIndex('products_v12')
+  await adapter.createIndex('products_v13')
+  adapter.steps.length = 0
+
+  const choice = await selectAliasRestoreTarget(adapter, {
+    indexName: 'products_v13',
+    previousIndices: ['products_v5', 'products_v7', 'products_v9', 'products_v12'],
+    indexPrefix: 'products_v',
+  })
+
+  assert.equal(choice.target, 'products_v12', '多个现存旧索引时取版本号最大的')
+  assert.match(choice.note, /恢复为现存旧索引 products_v12/)
+  assert.match(choice.note, /旧索引 products_v5 已不存在/)
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'deleteIndex'),
+    false,
+    '选择恢复目标只读，不删除索引',
+  )
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'updateAlias'),
+    false,
+    '选择恢复目标只读，不改别名',
+  )
 })
 
 /**
