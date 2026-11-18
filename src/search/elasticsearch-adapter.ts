@@ -23,6 +23,9 @@ import {
   type ProductSearchAdapter,
   type ProductSearchQuery,
   type ProductSearchResult,
+  type ProductSuggestionItem,
+  type ProductSuggestionQuery,
+  type ProductSuggestionResult,
 } from './product-search.ts'
 import type { ProductSearchDocument } from './product-snapshot.ts'
 
@@ -179,6 +182,28 @@ export class ElasticsearchProductIndexAdapter implements ProductIndexAdapter {
 const PRODUCT_SEARCH_FIELDS = ['name^3', 'model^3', 'brand^2', 'categoryName^1']
 
 /**
+ * 联想字段（#22）：name / brand / model 都是 search_as_you_type，
+ * bool_prefix 需要根字段与 ._2gram / ._3gram 一起参与，才能匹配输入中途的前缀。
+ */
+const PRODUCT_SUGGEST_FIELDS = [
+  'name', 'name._2gram', 'name._3gram',
+  'brand', 'brand._2gram', 'brand._3gram',
+  'model', 'model._2gram', 'model._3gram',
+]
+
+/** 联想只用索引内的三个展示字段，不回 MySQL（ADR 0002）。 */
+const PRODUCT_SUGGEST_SOURCE = ['slug', 'name', 'brand']
+
+/**
+ * 联想排序（#22）：相关性优先，同分追加 productId 升序。
+ * 与关键词搜索同理：ES 默认的平分次序依赖分片内部文档号，重建后会变。
+ */
+const PRODUCT_SUGGEST_SORT: SearchRequest['sort'] = [
+  { _score: { order: 'desc' } },
+  { productId: { order: 'asc' } },
+]
+
+/**
  * 端口排序 → ES 排序（D61、C49）：
  * - 未显式指定排序：相关性（_score）优先，同分追加 productId 升序；
  * - 三种显式排序：价格升序 / 价格降序 / 销量降序，同值同样追加 productId 升序。
@@ -240,6 +265,23 @@ function readSearchProductId (hit: SearchHit): number {
 }
 
 /**
+ * 联想命中的文档只取 slug / name / brand（ADR 0002）。
+ * 缺字段说明索引映射与查询契约不一致，属程序错误，不能映射成「不可用」。
+ */
+function readSuggestionItem (hit: SearchHit): ProductSuggestionItem {
+  const source = hit._source as { slug?: unknown, name?: unknown, brand?: unknown } | undefined
+  if (
+    source === undefined ||
+    typeof source.slug !== 'string' ||
+    typeof source.name !== 'string' ||
+    typeof source.brand !== 'string'
+  ) {
+    throw new Error('联想命中的文档 ' + (hit._id ?? '') + ' 缺少 slug / name / brand，索引映射与查询契约不一致。')
+  }
+  return { slug: source.slug, name: source.name, brand: source.brand }
+}
+
+/**
  * 4xx（除索引 / 别名不存在）说明请求本身不合法，是程序错误，原样上抛走 500；
  * 连接失败、超时、索引未就绪与其它 5xx 一律视为服务不可用，映射为 503。
  */
@@ -286,6 +328,35 @@ export class ElasticsearchProductSearchAdapter implements ProductSearchAdapter {
       total: typeof total === 'number' ? total : total?.value ?? 0,
       productIds: response.hits.hits.map(readSearchProductId),
     }
+  }
+
+  /**
+   * 商品联想（#22）：search_as_you_type 的 bool_prefix，按相关性排序、同分按 productId 升序。
+   * 只读索引内的 slug / name / brand（ADR 0002），因此不回 MySQL 补齐。
+   */
+  async suggest (query: ProductSuggestionQuery): Promise<ProductSuggestionResult> {
+    const request: SearchRequest = {
+      index: PRODUCTS_ALIAS,
+      size: query.limit,
+      _source: PRODUCT_SUGGEST_SOURCE,
+      query: {
+        multi_match: {
+          query: query.prefix,
+          type: 'bool_prefix',
+          fields: PRODUCT_SUGGEST_FIELDS,
+        },
+      },
+      sort: PRODUCT_SUGGEST_SORT,
+    }
+
+    let response: SearchResponse
+    try {
+      response = await this.client.search(request)
+    } catch (error) {
+      throw toSearchUnavailable(error)
+    }
+
+    return { items: response.hits.hits.map(readSuggestionItem) }
   }
 }
 

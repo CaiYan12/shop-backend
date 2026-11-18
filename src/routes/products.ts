@@ -21,6 +21,8 @@ import {
   SearchUnavailableError,
   type ProductSearchQuery,
   type ProductSearchResult,
+  type ProductSuggestionQuery,
+  type ProductSuggestionResult,
 } from '../search/product-search.ts'
 import { ProductSlugParams } from '../schemas/product.ts'
 
@@ -42,11 +44,47 @@ const ListProductsQuery = Type.Object({
   pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, default: 8 })),
 })
 
+/**
+ * 商品联想查询参数（#22）：q 必填、trim 后 1–100；limit 为 1–10 的整数，默认 5。
+ * `default` 只进契约，运行时仍由 handler 兜底（见 docs/typebox-notes.md）。
+ */
+const SuggestProductsQuery = Type.Object({
+  q: Type.String({ minLength: 1, maxLength: 100 }),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10, default: 5 })),
+})
+
+/** 商品联想的缺省条数（#22）：与契约里的 `default` 同值，但运行时由 handler 兜底。 */
+const SUGGESTION_DEFAULT_LIMIT = 5
+
 /** 关键词先 trim（D69）：空白串按无关键词处理，长度校验作用在 trim 之后。 */
 async function trimKeyword (request: FastifyRequest): Promise<void> {
   const query = request.query as { keyword?: string }
   if (typeof query.keyword === 'string') {
     query.keyword = query.keyword.trim()
+  }
+}
+
+/**
+ * 商品联想先 trim 再校验（#22）：空白 q 按非法参数处理，长度校验作用在 trim 之后。
+ * 缺参时框架校验的 instancePath 为空、明细只会落到 `querystring`，
+ * 这里补一条指向具体参数的明细，满足「details 指向对应参数」。
+ */
+async function normalizeSuggestionQuery (request: FastifyRequest): Promise<void> {
+  const query = request.query as { q?: unknown, limit?: unknown }
+  if (query.q === undefined) {
+    throw new AppError('VALIDATION_FAILED', '缺少查询参数 q。', [
+      { path: 'querystring/q', message: '必须提供 q。' },
+    ])
+  }
+  if (typeof query.q === 'string') {
+    query.q = query.q.trim()
+  }
+  // TypeBox 的 Convert 会把 "2.5" 截断成 2 再通过整数校验（见 docs/typebox-notes.md），
+  // 因此按原始字符串拒绝非整数字面量，保证 limit 的契约确实是整数。
+  if (typeof query.limit === 'string' && !/^[0-9]+$/.test(query.limit)) {
+    throw new AppError('VALIDATION_FAILED', 'limit 必须是 1–10 的整数。', [
+      { path: 'querystring/limit', message: 'limit 必须是 1–10 的整数。' },
+    ])
   }
 }
 
@@ -104,6 +142,24 @@ async function searchProductHits (
 ): Promise<ProductSearchResult> {
   try {
     return await app.productSearch.search(query)
+  } catch (error) {
+    if (error instanceof SearchUnavailableError) {
+      throw new AppError('SEARCH_NOT_AVAILABLE', '搜索服务暂时不可用，请稍后重试。')
+    }
+    throw error
+  }
+}
+
+/**
+ * 商品联想（#22）：与关键词搜索共用同一个端口与同一套降级语义。
+ * 路由只把端口结果转成响应，不感知查询 DSL，也不直接持有适配器。
+ */
+async function suggestProductHits (
+  app: AppInstance,
+  query: ProductSuggestionQuery,
+): Promise<ProductSuggestionResult> {
+  try {
+    return await app.productSearch.suggest(query)
   } catch (error) {
     if (error instanceof SearchUnavailableError) {
       throw new AppError('SEARCH_NOT_AVAILABLE', '搜索服务暂时不可用，请稍后重试。')
@@ -226,6 +282,30 @@ function registerListProductsRoute (app: AppInstance): void {
       totalPages: total === 0 ? 0 : Math.ceil(total / pageSize),
       items,
     }
+  })
+}
+
+/** 商品联想路由（#22）：参数校验先于搜索可用性判断。 */
+function registerListSuggestionsRoute (app: AppInstance): void {
+  app.get('/api/products/suggestions', {
+    schema: {
+      operationId: 'listSuggestions',
+      tags: ['商品'],
+      querystring: SuggestProductsQuery,
+      response: {
+        200: Type.Ref('ProductSuggestionsResponse'),
+        400: Type.Ref('ErrorResponse'),
+        500: Type.Ref('ErrorResponse'),
+        503: Type.Ref('ErrorResponse'),
+      },
+    },
+    preValidation: normalizeSuggestionQuery,
+  }, async (request) => {
+    // TypeBoxValidatorCompiler 只做 Convert + Check，不应用 schema 的 default，
+    // 所以这里的兜底不是死代码（见 docs/typebox-notes.md）。
+    const limit = request.query.limit ?? SUGGESTION_DEFAULT_LIMIT
+    const result = await suggestProductHits(app, { prefix: request.query.q, limit })
+    return { items: result.items }
   })
 }
 
@@ -353,6 +433,7 @@ function registerListRecommendationsRoute (app: AppInstance): void {
 /** 商品路由（D58）：挂载在应用工厂内、文档插件之后。 */
 export function registerProductRoutes (app: AppInstance): void {
   registerListProductsRoute(app)
+  registerListSuggestionsRoute(app)
   registerGetProductRoute(app)
   registerListRecommendationsRoute(app)
 }

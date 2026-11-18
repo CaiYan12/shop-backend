@@ -80,6 +80,18 @@ export const ProductRecommendationsResponse = Type.Object({
   items: Type.Array(Type.Ref('ProductListItem')),
 }, { $id: 'ProductRecommendationsResponse' })
 
+/** 商品联想条目（#22）：只用索引里已有的稳定标识与展示文本，本票不含高亮（#23）。 */
+export const ProductSuggestionItem = Type.Object({
+  slug: Type.String(),
+  name: Type.String(),
+  brand: Type.String(),
+}, { $id: 'ProductSuggestionItem' })
+
+/** 商品联想响应（#22）：最多 limit 条；非分页集合统一带 `items`。 */
+export const ProductSuggestionsResponse = Type.Object({
+  items: Type.Array(Type.Ref('ProductSuggestionItem')),
+}, { $id: 'ProductSuggestionsResponse' })
+
 /** 规格维度（D40）：保持商品声明的顺序，规格组合的选项值按此顺序解释。 */
 export const ProductDimension = Type.Object({
   name: Type.String(),
@@ -209,6 +221,8 @@ export function registerProductSchemas (app: AppInstance): void {
   app.addSchema(ProductListItem)
   app.addSchema(ProductListResponse)
   app.addSchema(ProductRecommendationsResponse)
+  app.addSchema(ProductSuggestionItem)
+  app.addSchema(ProductSuggestionsResponse)
   app.addSchema(ProductDimension)
   app.addSchema(ProductVariant)
   app.addSchema(ProductDetailBlock)

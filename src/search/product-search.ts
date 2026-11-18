@@ -5,8 +5,8 @@ import type { ProductListSort } from '../db/product-list.ts'
  *
  * 路由只依赖这个端口，不直接持有 Elasticsearch 客户端：应用工厂负责注入实现，
  * 默认测试注入假实现，因此 `pnpm test` 不依赖 Elasticsearch 在线。
- * 端口只表达「查什么、要第几页」，排序与筛选语义由实现翻译成自己的查询语言，
- * 调用方（路由）不感知 DSL。
+ * 关键词搜索与商品联想共用这个端口：端口只表达「查什么、要第几页 / 几条」，
+ * 排序与筛选语义由实现翻译成自己的查询语言，调用方（路由）不感知 DSL。
  */
 export interface ProductSearchQuery {
   /** 已 trim 的关键词，长度 1–100；空串不会进入端口。 */
@@ -38,8 +38,33 @@ export interface ProductSearchResult {
   productIds: number[]
 }
 
+/**
+ * 商品联想查询（#22）：已 trim 的输入前缀与返回条数上限。
+ * 与关键词搜索共用同一端口，路由不区分两个能力背后的实现。
+ */
+export interface ProductSuggestionQuery {
+  /** 已 trim 的输入前缀，长度 1–100；空串不会进入端口。 */
+  prefix: string
+  /** 返回条数上限，1–10。 */
+  limit: number
+}
+
+/** 商品联想条目（#22）：本票只返 slug / name / brand，不含高亮（#23）。 */
+export interface ProductSuggestionItem {
+  slug: string
+  name: string
+  brand: string
+}
+
+export interface ProductSuggestionResult {
+  /** 按相关性排序、同分按 productId 升序；长度不超过 limit。 */
+  items: ProductSuggestionItem[]
+}
+
 export interface ProductSearchAdapter {
   search (query: ProductSearchQuery): Promise<ProductSearchResult>
+  /** 商品联想（#22）：按输入前缀返回商品条目；不可用时同样抛 SearchUnavailableError。 */
+  suggest (query: ProductSuggestionQuery): Promise<ProductSuggestionResult>
 }
 
 /**

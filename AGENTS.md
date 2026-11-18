@@ -15,7 +15,7 @@
 - 不把 `.env`、口令、token 写入仓库；只保留 `.env.example` 占位示例。
 - 文档与提交信息用中文；代码标识符保持实际大小写，不做归一化。
 - 未验证的结论不写成事实；事实、推论、建议分开写。
-- TypeBox 与 Fastify 的三条易踩行为（`default` 不生效、请求侧 `$ref` 不可用、`const` 默认被转 `enum`）见 `docs/typebox-notes.md`。
+- TypeBox 与 Fastify 的四条易踩行为（`default` 不生效、请求侧 `$ref` 不可用、`const` 默认被转 `enum`、`Value.Convert` 会截断小数字面量）见 `docs/typebox-notes.md`。
 
 ## 双仓库约定
 
