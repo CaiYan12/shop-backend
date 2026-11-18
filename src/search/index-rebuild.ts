@@ -331,6 +331,69 @@ export async function settleAliasExclusiveTarget (
   )
 }
 
+/** 别名被撤空后选择恢复目标的结果（第六轮复审 P1）。 */
+export interface AliasRestoreChoice {
+  /** 要加回别名的索引；undefined 表示没有可用恢复目标。 */
+  target: string | undefined
+  /** 选择依据；写进重建错误消息。 */
+  note: string
+}
+
+/**
+ * 选择别名被撤空后的恢复目标（第六轮复审 P1）。
+ *
+ * 只恢复确实存在的索引：外部可能已经撤空别名并删除旧索引，
+ * 盲目 add 旧索引会再次失败、别名继续为零目标（关键词接口 503）。
+ * - 有现存旧索引：取版本号最大的那个，保持「优先旧索引」的意图；
+ * - 旧索引都不存在了：恢复本进程刚创建并通过校验的新索引；
+ * - listProductIndices 抛错：无法确认，直接恢复新索引（新索引最可信）；
+ * - 连新索引都不在现存集合里：没有可用恢复目标，由调用方写明并保留现场。
+ */
+export async function selectAliasRestoreTarget (
+  adapter: ProductIndexAdapter,
+  options: { indexName: string, previousIndices: string[], indexPrefix: string },
+): Promise<AliasRestoreChoice> {
+  const { indexName, previousIndices, indexPrefix } = options
+
+  let existing: Set<string>
+  try {
+    existing = new Set(await adapter.listProductIndices())
+  } catch (error) {
+    return {
+      target: indexName,
+      note: `无法确认旧索引是否仍存在（${describeError(error)}），恢复为新索引 ${indexName}`,
+    }
+  }
+
+  const existingPrevious = previousIndices.filter((index) => existing.has(index))
+  const missingPrevious = previousIndices.filter((index) => !existing.has(index))
+  const missingNote = missingPrevious.length === 0
+    ? ''
+    : `；旧索引 ${describeTargets(missingPrevious)} 已不存在`
+
+  if (existingPrevious.length > 0) {
+    const latest = existingPrevious.reduce((left, right) =>
+      (productIndexVersion(right, indexPrefix) ?? -1) > (productIndexVersion(left, indexPrefix) ?? -1)
+        ? right
+        : left,
+    )
+    return { target: latest, note: `恢复为现存旧索引 ${latest}${missingNote}` }
+  }
+
+  const noOldNote = previousIndices.length === 0
+    ? '没有旧索引'
+    : `旧索引 ${describeTargets(previousIndices)} 已不存在`
+
+  if (existing.has(indexName)) {
+    return { target: indexName, note: `${noOldNote}，恢复为新索引 ${indexName}` }
+  }
+
+  return {
+    target: undefined,
+    note: `${noOldNote}，新索引 ${indexName} 也不在现存索引中，无可用恢复目标`,
+  }
+}
+
 /**
  * 全量重建商品索引（ADR 0003）。
  *
@@ -592,22 +655,32 @@ async function rebuildProductIndexLocked (
         rollbackNote += `；核对别名状态失败（${describeError(checkError)}）`
       }
     }
-    // 别名胜不为空（第五轮复审）：回滚（或首次发布跳过回滚）后一律复查；
-    // 只要读到零目标，立即把旧索引（存在时）或新索引加回别名，避免关键词接口 503。
+    // 别名非空（第五轮复审，第六轮复审修正）：回滚（或首次发布跳过回滚）后一律复查；
+    // 只要读到零目标，立即恢复「确实存在」的索引：优先版本号最大的现存旧索引，
+    // 旧索引都被删了就恢复新索引。不能再按 previousIndices 盲 add 已删除的旧索引。
     if (aliasTargets !== undefined && aliasTargets.length === 0) {
-      const restoreTargets = previousIndices.length > 0 ? previousIndices : [indexName]
-      try {
-        await adapter.updateAlias(alias, restoreTargets, [])
-        rollbackNote +=
-          `；别名一度为空，已恢复别名，避免零目标（恢复为 ${describeTargets(restoreTargets)}）`
+      const restore = await selectAliasRestoreTarget(adapter, {
+        indexName,
+        previousIndices,
+        indexPrefix,
+      })
+      rollbackNote += `；${restore.note}`
+      if (restore.target === undefined) {
+        rollbackNote += '，未恢复别名，请人工检查'
+      } else {
         try {
-          aliasTargets = await adapter.aliasIndices(alias)
-        } catch (recheckError) {
-          aliasTargets = undefined
-          rollbackNote += `；恢复后核对别名失败（${describeError(recheckError)}）`
+          await adapter.updateAlias(alias, [restore.target], [])
+          rollbackNote +=
+            `；别名一度为空，已恢复别名，避免零目标（恢复为 ${restore.target}）`
+          try {
+            aliasTargets = await adapter.aliasIndices(alias)
+          } catch (recheckError) {
+            aliasTargets = undefined
+            rollbackNote += `；恢复后核对别名失败（${describeError(recheckError)}）`
+          }
+        } catch (restoreError) {
+          rollbackNote += `；别名为空，恢复失败（${describeError(restoreError)}）`
         }
-      } catch (restoreError) {
-        rollbackNote += `；别名为空，恢复失败（${describeError(restoreError)}）`
       }
     }
     const aliasChecked = aliasTargets !== undefined
