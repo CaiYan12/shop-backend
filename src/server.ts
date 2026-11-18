@@ -3,12 +3,25 @@ import { createApp, type AppInstance } from './app.ts'
 import { describeConfig, loadConfig, type AppConfig } from './config.ts'
 import { createDb, createPool } from './db/client.ts'
 import { runIfMain } from './run-if-main.ts'
+import {
+  createElasticsearchClient,
+  ElasticsearchProductSearchAdapter,
+} from './search/elasticsearch-adapter.ts'
+import type { ProductSearchAdapter } from './search/product-search.ts'
+
+/**
+ * 在线搜索的请求超时（V19 待实测）：显式 3 s、不自动重试。
+ * 与重建客户端分开取超时：重建一次 bulk 允许 30 s，在线查询不能等那么久。
+ */
+const SEARCH_REQUEST_TIMEOUT_MS = 3_000
 
 export interface StartServerOptions {
   /** 已解析的配置；省略时读取 .env 与进程环境变量。 */
   config?: AppConfig
   /** 连接池工厂；默认 createPool。测试注入以观察监听失败时的关闭行为。 */
   createPool?: (config: AppConfig) => Pool
+  /** 搜索能力端口；省略时装配真实 Elasticsearch 适配器（#21）。 */
+  search?: ProductSearchAdapter
   /** 是否输出请求日志；默认开启。 */
   logger?: boolean
 }
@@ -27,7 +40,15 @@ export interface StartedServer {
 export async function startServer (options: StartServerOptions = {}): Promise<StartedServer> {
   const config = options.config ?? loadConfig()
   const pool = (options.createPool ?? createPool)(config)
-  const app = await createApp({ db: createDb(pool), config, logger: options.logger ?? true })
+  const search = options.search ?? new ElasticsearchProductSearchAdapter(
+    createElasticsearchClient({ node: config.esUrl, requestTimeout: SEARCH_REQUEST_TIMEOUT_MS }),
+  )
+  const app = await createApp({
+    db: createDb(pool),
+    config,
+    search,
+    logger: options.logger ?? true,
+  })
 
   try {
     const address = await app.listen({ port: config.port, host: '127.0.0.1' })

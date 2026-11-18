@@ -3,6 +3,8 @@ import { createApp, type AppInstance } from '../../src/app.ts'
 import { createDb, createPool, type Database } from '../../src/db/client.ts'
 import { runMigrations } from '../../src/db/migrate.ts'
 import { seedDatabase } from '../../src/db/seed.ts'
+import type { ProductSearchAdapter } from '../../src/search/product-search.ts'
+import { FakeProductSearchAdapter } from './fake-search-adapter.ts'
 import { loadTestConfig } from './test-config.ts'
 
 /**
@@ -13,23 +15,31 @@ export interface SeededApp {
   pool: Pool
   db: Database
   app: AppInstance
+  /** 本次应用工厂装配的搜索端口；默认是记录型假实现，关键词用例可自行断言或替换行为。 */
+  search: ProductSearchAdapter
+}
+
+export interface CreateSeededAppOptions {
+  /** 搜索端口；缺省注入假实现，因此默认套件不依赖 Elasticsearch。 */
+  search?: ProductSearchAdapter
 }
 
 /**
  * 创建连接池、跑迁移与种子、构建并 ready 应用。
  * 中途失败时关闭连接池，避免测试进程留下悬挂连接。
  */
-export async function createSeededApp (): Promise<SeededApp> {
+export async function createSeededApp (options: CreateSeededAppOptions = {}): Promise<SeededApp> {
   const config = loadTestConfig()
   const pool = createPool(config)
+  const search = options.search ?? new FakeProductSearchAdapter()
 
   try {
     const db = createDb(pool)
     await runMigrations(db)
     await seedDatabase(db)
-    const app = await createApp({ db, config })
+    const app = await createApp({ db, config, search })
     await app.ready()
-    return { pool, db, app }
+    return { pool, db, app, search }
   } catch (error) {
     await pool.end()
     throw error

@@ -4,13 +4,16 @@ import type { ResultSetHeader, RowDataPacket } from 'mysql2'
 import type { Pool } from 'mysql2/promise'
 import type { AppInstance } from '../src/app.ts'
 import type { ErrorBody, ListItem } from './helpers/api-types.ts'
+import { FakeProductSearchAdapter } from './helpers/fake-search-adapter.ts'
 import { closeSeededApp, createSeededApp } from './helpers/seeded-app.ts'
 
 let pool: Pool
 let app: AppInstance
+/** 关键词路径已改走搜索端口（#21）：这里注入假实现，断言「无关键词时不调用它」。 */
+const search = new FakeProductSearchAdapter()
 
 before(async () => {
-  ({ pool, app } = await createSeededApp())
+  ({ pool, app } = await createSeededApp({ search }))
 })
 
 after(async () => {
@@ -338,22 +341,17 @@ test('价格下限大于上限返回 400 与 VALIDATION_FAILED，明细指向价
   assert.equal(body.error.details?.[0]?.path, 'querystring/priceMinCents')
 })
 
-test('请求校验先于服务不可用：跨字段价格错误与非法关键词同时出现时返回 400', async () => {
+test('请求校验先于搜索调用：跨字段价格错误与关键词同时出现时返回 400', async () => {
+  search.reset()
   const { status, body } = await list({
     keyword: '蓝牙',
     priceMinCents: 20000,
     priceMaxCents: 19999,
   })
-  assert.equal(status, 400, '可修正的请求校验应排在 503 之前')
+  assert.equal(status, 400, '可修正的请求校验应排在搜索调用之前')
   assert.equal(body.error.code, 'VALIDATION_FAILED')
   assert.equal(body.error.details?.[0]?.path, 'querystring/priceMinCents')
-})
-
-test('非空关键词返回 503 与 SEARCH_NOT_AVAILABLE', async () => {
-  const { status, body } = await list({ keyword: '蓝牙' })
-  assert.equal(status, 503)
-  assert.equal(body.error.code, 'SEARCH_NOT_AVAILABLE')
-  assert.equal(typeof body.error.message, 'string')
+  assert.equal(search.queries.length, 0, '校验失败的请求不应调用搜索端口')
 })
 
 test('空串、纯空白与超长空白关键词都按无关键词处理', async () => {
