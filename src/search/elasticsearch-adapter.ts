@@ -83,6 +83,33 @@ function isResourceAlreadyExists (error: unknown): boolean {
   return meta?.body?.error?.type === 'resource_already_exists_exception'
 }
 
+/** 一次别名动作：add / remove 二选一，失败时用来在消息里指明是哪一项。 */
+interface AliasActionRequest {
+  add?: { index: string, alias: string }
+  remove?: { index: string, alias: string }
+}
+
+function describeAliasAction (action: AliasActionRequest): string {
+  if (action.add !== undefined) return `add ${action.add.index} -> ${action.add.alias}`
+  if (action.remove !== undefined) return `remove ${action.remove.index} -> ${action.remove.alias}`
+  return '(未知动作)'
+}
+
+/**
+ * action_results 与请求里的 actions 一一对应，false 表示该项失败（第三轮复审）。
+ * 只报 acknowledged / errors 两个布尔无法定位是哪一项失败，这里把失败动作与序号带进消息。
+ */
+function describeFailedAliasActions (actions: AliasActionRequest[], actionResults: unknown): string {
+  if (!Array.isArray(actionResults)) return ''
+  const failed: string[] = []
+  actionResults.forEach((result, index) => {
+    if (result !== false) return
+    const action = actions[index]
+    failed.push(`第 ${index + 1} 项 ${action === undefined ? '(未知动作)' : describeAliasAction(action)}`)
+  })
+  return failed.join('、')
+}
+
 interface BulkItemPayload {
   _id?: string
   status?: number
@@ -211,13 +238,16 @@ export class ElasticsearchProductIndexAdapter implements ProductIndexAdapter {
       ...remove.map((index) => ({ remove: { index, alias } })),
     ]
     if (actions.length === 0) return
-    const response: { acknowledged?: boolean, errors?: boolean } =
+    const response: { acknowledged?: boolean, errors?: boolean, action_results?: boolean[] } =
       await this.client.indices.updateAliases({ actions })
     // HTTP 200 也可能只是受理了请求：未确认或带错误时按失败处理，
     // 让重建流程进入别名核对，而不是误以为未切换后删掉新索引。
     if (response.acknowledged !== true || response.errors === true) {
+      const failedActions = describeFailedAliasActions(actions, response.action_results)
       throw new Error(
-        `切换别名 ${alias} 未成功：acknowledged=${String(response.acknowledged)}，errors=${String(response.errors ?? false)}。`,
+        `切换别名 ${alias} 未成功：acknowledged=${String(response.acknowledged)}，` +
+          `errors=${String(response.errors ?? false)}` +
+          `${failedActions === '' ? '。' : `；失败动作：${failedActions}。`}`,
       )
     }
   }

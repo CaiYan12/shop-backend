@@ -6,6 +6,7 @@ import {
   productIndexVersion,
 } from './index-mapping.ts'
 import type { ProductSearchDocument } from './product-snapshot.ts'
+import { acquireRebuildLock } from './rebuild-lock.ts'
 
 /** 索引字段映射的只读视图：重建用它回读目标索引的实际 mapping（P2）。 */
 export type IndexMapping = Record<string, { type?: string, analyzer?: string }>
@@ -72,6 +73,11 @@ export interface RebuildProductIndexOptions {
   indexPrefix?: string
   /** 进度输出；默认静默。 */
   log?: (line: string) => void
+  /**
+   * 重建互斥锁文件；默认 <仓库根>/.run/es-rebuild.lock（不依赖 cwd）。
+   * 测试注入临时路径；获取与释放都在 rebuildProductIndex 内部完成。
+   */
+  lockPath?: string
 }
 
 export interface RebuildStageTiming {
@@ -94,6 +100,22 @@ export class IndexRebuildError extends Error {
   constructor (message: string, options?: ErrorOptions) {
     super(message, options)
     this.name = 'IndexRebuildError'
+  }
+}
+
+/**
+ * 切换后的唯一目标不变式被打破（第三轮复审）。
+ * 这类失败保留现场：不回滚别名、不删除任何索引，并把实际目标带进消息。
+ */
+export class AliasExclusivityError extends IndexRebuildError {
+  readonly alias: string
+  readonly targets: string[]
+
+  constructor (alias: string, targets: string[], message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'AliasExclusivityError'
+    this.alias = alias
+    this.targets = [...targets]
   }
 }
 
@@ -152,6 +174,50 @@ function assertBulkSucceeded (bulk: BulkOutcome, expectedCount: number): void {
 }
 
 /**
+ * 切换后的不变式（第三轮复审）：别名必须恰好一个目标，且就是 indexName。
+ *
+ * 两个重建各自读到同一旧集合时会互相 add，别名出现多个目标。发现多目标先收敛：
+ * 用一次 _aliases 请求移除除 indexName 之外的全部目标，再复查；收敛请求失败或
+ * 复查仍不唯一都按失败处理，由调用方保留现场（不回滚、不删除任何索引）。
+ */
+async function ensureExclusiveAliasTarget (
+  adapter: ProductIndexAdapter,
+  alias: string,
+  indexName: string,
+  log: (line: string) => void,
+): Promise<void> {
+  const targets = await adapter.aliasIndices(alias)
+  if (targets.length === 1 && targets[0] === indexName) return
+
+  const extras = targets.filter((target) => target !== indexName)
+  if (targets.includes(indexName) && extras.length > 0) {
+    log(`[es:rebuild] 别名 ${alias} 同时指向 ${targets.join('、')}，先收敛为唯一目标 ${indexName}`)
+    try {
+      await adapter.updateAlias(alias, [], extras)
+    } catch (error) {
+      throw new AliasExclusivityError(
+        alias,
+        targets,
+        `别名 ${alias} 有多个目标（实际：${targets.join('、')}），移除多余目标的请求失败：${describeError(error)}。`,
+        { cause: error },
+      )
+    }
+    const reconciled = await adapter.aliasIndices(alias)
+    if (reconciled.length === 1 && reconciled[0] === indexName) return
+    throw new AliasExclusivityError(
+      alias,
+      reconciled,
+      `别名 ${alias} 收敛后仍不唯一（实际：${reconciled.length === 0 ? '无目标' : reconciled.join('、')}；` +
+        `期望只有 ${indexName}）。`,
+    )
+  }
+
+  throw new IndexRebuildError(
+    `别名 ${alias} 切换后未指向 ${indexName}（实际：${targets.length === 0 ? '无目标' : targets.join('、')}）。`,
+  )
+}
+
+/**
  * 全量重建商品索引（ADR 0003）。
  *
  * 固定顺序：建新物理索引 → 读快照 → bulk 逐项检查 → refresh → 校验映射
@@ -165,6 +231,27 @@ function assertBulkSucceeded (bulk: BulkOutcome, expectedCount: number): void {
  * 他人的索引在任何异常路径下都不删除（P2）。
  */
 export async function rebuildProductIndex (
+  adapter: ProductIndexAdapter,
+  options: RebuildProductIndexOptions,
+): Promise<RebuildProductIndexResult> {
+  // 互斥（第三轮复审）：CLI 与直接调用都在这里取得锁；成功与异常都由 finally 释放。
+  const lock = acquireRebuildLock({ lockPath: options.lockPath })
+  try {
+    if (lock.recoveredFrom !== undefined) {
+      const log = options.log ?? (() => {})
+      log(
+        `[es:rebuild] 已清理过期重建锁（pid=${lock.recoveredFrom.pid}，` +
+          `启动时间=${lock.recoveredFrom.startTime}）：持有者已消失，由本次重建接管`,
+      )
+    }
+    return await rebuildProductIndexLocked(adapter, options)
+  } finally {
+    lock.release()
+  }
+}
+
+/** 已取得互斥锁的重建主体；锁由 rebuildProductIndex 在 finally 中释放。 */
+async function rebuildProductIndexLocked (
   adapter: ProductIndexAdapter,
   options: RebuildProductIndexOptions,
 ): Promise<RebuildProductIndexResult> {
@@ -306,12 +393,8 @@ export async function rebuildProductIndex (
     await runStage('切换别名', () => adapter.updateAlias(alias, [indexName], previousIndices))
     aliasSwitched = true
 
-    await runStage('校验别名', async () => {
-      const targets = await adapter.aliasIndices(alias)
-      if (!targets.includes(indexName)) {
-        throw new IndexRebuildError(`别名 ${alias} 切换后未指向 ${indexName}。`)
-      }
-    })
+    // 切换后的不变式（第三轮复审）：别名必须恰好一个目标，且就是本次的新索引。
+    await runStage('校验别名', () => ensureExclusiveAliasTarget(adapter, alias, indexName, log))
 
     const smokeTotal = await runStage('冒烟查询', () => adapter.searchTotal(alias))
     if (smokeTotal < 1) {
@@ -343,9 +426,13 @@ export async function rebuildProductIndex (
     }
   } catch (error) {
     const failure = describeError(error)
+    // 唯一目标不变式失败（第三轮复审）：保留现场——不回滚别名、不删除任何索引。
+    const exclusivityFailure = error instanceof AliasExclusivityError
     let rollbackNote = ''
     let rollbackSucceeded = false
-    if (aliasSwitched) {
+    if (exclusivityFailure) {
+      rollbackNote = '；别名目标不唯一，未回滚、未删除任何索引'
+    } else if (aliasSwitched) {
       try {
         await adapter.updateAlias(alias, previousIndices, [indexName])
         aliasSwitched = false
@@ -372,7 +459,9 @@ export async function rebuildProductIndex (
     const aliasPointsToNewIndex = aliasTargets?.includes(indexName) ?? false
 
     let cleanupNote = ''
-    if (!createdIndex) {
+    if (exclusivityFailure) {
+      cleanupNote = `；别名 ${alias} 目标不唯一，未执行任何索引删除（新索引 ${indexName} 已保留）`
+    } else if (!createdIndex) {
       // 所有权（P2）：不是自己创建的索引，任何异常路径都不碰。
       cleanupNote = `；索引 ${indexName} 不是由本次重建创建，未执行清理`
     } else if (switchOutcomeUncertain) {
@@ -394,18 +483,21 @@ export async function rebuildProductIndex (
       }
     }
 
-    const prefix = !switchAttempted
-      ? '索引重建失败，未切换别名'
-      : switchOutcomeUncertain && aliasChecked && !aliasPointsToNewIndex
-        ? '索引重建失败，别名切换结果不确定'
-        : !aliasChecked
-          ? '索引重建失败，别名状态未知'
-          : aliasPointsToNewIndex
-            ? '索引重建失败'
-            : '索引重建失败，未切换别名'
-    throw new IndexRebuildError(
-      `${prefix}（${failure}）${rollbackNote}${cleanupNote}。`,
-      { cause: error },
-    )
+    const prefix = exclusivityFailure
+      ? '索引重建失败，别名目标不唯一'
+      : !switchAttempted
+        ? '索引重建失败，未切换别名'
+        : switchOutcomeUncertain && aliasChecked && !aliasPointsToNewIndex
+          ? '索引重建失败，别名切换结果不确定'
+          : !aliasChecked
+            ? '索引重建失败，别名状态未知'
+            : aliasPointsToNewIndex
+              ? '索引重建失败'
+              : '索引重建失败，未切换别名'
+    const message = `${prefix}（${failure}）${rollbackNote}${cleanupNote}。`
+    // 唯一目标失败保持专门的错误类型，调用方无需解析文案即可识别。
+    throw error instanceof AliasExclusivityError
+      ? new AliasExclusivityError(error.alias, error.targets, message, { cause: error })
+      : new IndexRebuildError(message, { cause: error })
   }
 }
