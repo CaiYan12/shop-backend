@@ -569,4 +569,3 @@ test('并发：同一锁路径下两个重建只有一个成功，另一个因�
   assert.equal(existsSync(lockPath), false, '重建结束后必须释放锁')
   assert.equal(adapter.indices.size, 1, '失败方不得创建索引')
 })
-
