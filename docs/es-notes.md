@@ -364,6 +364,7 @@ QUERY_OK=100 QUERY_BAD=0
 | V13 首次建索引 / 写入 / 全量重建 / 重启分片恢复 / `_cluster/settings` 回读 | **已验证**（§8）；水位实际触发迁移未做（见 §8.4） |
 | V14 安装目录 / 数据目录 / 日志目录分项占用 | **已测量**（§9）：≈984.2 MiB / 0.24–0.33 MiB / 1.23–1.41 MiB |
 | V11 商品联想五类输入 | **已验证**（§11）：单字 / 半词 / 品牌前缀符合预期；完整词与型号前缀有额外召回，原因见 §11 |
+| 高亮转义与联想前缀标记（#23） | **已验证**（§12）：真机返回 `&lt;b&gt;x&lt;&#x2F;b&gt;`，`<em>` 是唯一标签；联想前缀需 `matched_fields` 指向 `._index_prefix` |
 | 关键词搜索耗时与降级冷却 | 读路径已由 #21 落地（本文件未记录耗时）；**5 秒冷却窗口未做**，#24 范围 |
 | 重启机器后 ES 是否可用 | 未验证；ES 不会开机自启，需 `start.bat` 或 `node scripts/es-dev.mjs` 拉起 |
 | 并发启动两个 `start.bat` | 未验证。设计上第二个会走复用路径，但没有做并发压测 |
@@ -411,4 +412,48 @@ QUERY_OK=100 QUERY_BAD=0
   本票按要求**如实记录、不擅自改映射**；若要收紧型号前缀，可另行评估给 `model` 加 `keyword` 子字段或按字段加权，
   属新决策，不在 #22 范围。
 - 五类输入都返回 HTTP 200；`limit=10` 时各输入返回 2–4 条，符合「最多 limit 条」。
-- 本次只验证联想；高亮（#23）与失败冷却窗口（#24）不在本记录范围。
+- 本次只验证联想；高亮（#23）见 §12，失败冷却窗口（#24）不在本记录范围。
+
+## 12. 命中高亮与转义实测（#23）
+
+采集日期：2026-11-18（Asia/Shanghai）。ES 9.5.6，映射沿用 `PRODUCT_INDEX_DEFINITION`。
+
+种子数据里没有 HTML，因此用临时索引 `highlight-probe`（写完即删）：按同一份映射常量建索引，
+放两条文档，其中一条的 `name` 为：
+
+```
+Sony <b>x</b> 无线降噪头戴耳机 <script>alert(1)</script>
+```
+
+脚本：`.run/v23-highlight.mjs`（`.run/` 已 gitignore，不提交）。它构造真实的
+`ElasticsearchProductSearchAdapter`，但把客户端换成「捕获请求 → 把索引名换成临时索引 → 转发给真实 ES」的转发器，
+因此验证的是适配器自己发出的 highlight 配置，而不是另抄一份查询。
+
+实际发出的 highlight 配置：
+
+| 接口 | 配置 |
+|---|---|
+| 列表 | `encoder: 'html'`、`pre_tags: ['<em>']`、`post_tags: ['</em>']`；`fields` 为 `name` / `brand` / `model`，各自 `number_of_fragments: 0` |
+| 联想 | 同上；`fields` 只有 `name` / `brand`，各自带 `matched_fields: [字段, '字段._index_prefix']` |
+
+实测返回片段（原样）：
+
+| 接口 | 片段 |
+|---|---|
+| 列表（probe-html） | `Sony &lt;b&gt;x&lt;&#x2F;b&gt; 无线<em>降</em><em>噪</em>头戴耳机 &lt;script&gt;alert(1)&lt;&#x2F;script&gt;` |
+| 列表（probe-airpods） | `Apple AirPods Max 头戴式<em>降</em><em>噪</em>耳机` |
+| 联想 q=AirP | `Apple <em>AirPods Max 头</em>戴式降噪耳机` |
+
+结论：
+
+- **转义生效**：原文的 `<b>` / `</b>` / `<script>` / `</script>` 全部变成实体，片段里不再出现裸的 `<`、`>`；
+  斜杠被编码成 `&#x2F;`（ES 的 html 编码器行为），前端按文本渲染即可。
+- **`<em>` 是唯一标签**：把所有片段里的 `<em>` / `</em>` 去掉后，剩余文本不含 `<` 或 `>`
+  （脚本里的 `TAGS_OUTSIDE_EM` 为空数组 `[]`）。
+- **联想的高亮依赖 `matched_fields`**：只写根字段 `name` 时，`bool_prefix` 的命中落在 `._2gram` / `._3gram` /
+  `._index_prefix` 子字段上，`AirP` 这类输入返回的命中**没有任何片段**（只写根字段的对照实测为空）；
+  把根字段与 `._index_prefix` 合并后才标出前缀。
+- **已知偏差**：`._index_prefix` 是边向前缀，覆盖范围会连带标记后面的词（`AirP` 标成 `AirPods Max 头`）；
+  属该子字段行为，如实记录，不在本票收紧。
+- 临时索引已删除：脚本末尾 `DELETE`，输出 `PROBE_INDEX_DELETED=highlight-probe`。
+

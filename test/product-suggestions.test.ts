@@ -22,6 +22,7 @@ interface SuggestionsBody {
   items: SuggestionItem[]
 }
 
+
 const config = loadTestConfig()
 const search = new FakeProductSearchAdapter()
 
@@ -109,6 +110,42 @@ test('limit 必须是 1–10 的整数：越界与非整数返回 400，明细�
   assert.equal(search.suggestionQueries.length, 0, '参数校验失败的请求不应调用搜索端口')
 })
 
+interface SuggestionHighlight {
+  name?: string[]
+  brand?: string[]
+}
+
+interface HighlightedSuggestionItem extends SuggestionItem {
+  highlight?: SuggestionHighlight
+}
+
+test('联想条目带命中高亮：有片段时按 name / brand 组织，无片段时字段缺省', async () => {
+  search.reset()
+  search.items = [
+    {
+      ...ITEMS[0]!,
+      highlight: {
+        name: ['Sony WH-1000XM3 无线<em>降噪</em>头戴耳机'],
+        brand: ['<em>Sony</em>'],
+      },
+    },
+    // 无命中片段的条目：不补空 highlight，也不补空数组字段。
+    ITEMS[1]!,
+  ]
+
+  const { status, body } = await suggest({ q: '降噪' })
+  assert.equal(status, 200)
+
+  const items = body.items as HighlightedSuggestionItem[]
+  assert.deepEqual(items[0]?.highlight, {
+    name: ['Sony WH-1000XM3 无线<em>降噪</em>头戴耳机'],
+    brand: ['<em>Sony</em>'],
+  })
+  assert.equal('highlight' in (items[1] ?? {}), false, '无命中片段的条目不应带 highlight 字段')
+
+  search.reset()
+})
+
 test('搜索端口不可用返回 503 与 SEARCH_NOT_AVAILABLE', async () => {
   search.reset()
   search.failUnavailable()
@@ -149,6 +186,10 @@ test('响应条数不超过 limit：顺序与端口一致，条目只含 slug / 
     '联想条目顺序应原样透传端口结果',
   )
   for (const item of body.items) {
-    assert.deepEqual(Object.keys(item).sort(), ['brand', 'name', 'slug'], '本票不做高亮，条目只有三个字段')
+    assert.deepEqual(
+      Object.keys(item).sort(),
+      ['brand', 'name', 'slug'],
+      '没有命中片段时条目只有三个字段，#23 不补空 highlight',
+    )
   }
 })

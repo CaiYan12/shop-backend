@@ -36,6 +36,11 @@ export interface ProductSearchResult {
   total: number
   /** 当前页的命中商品 id，按搜索实现的排序；展示字段由 MySQL 按这个顺序补齐。 */
   productIds: number[]
+  /**
+   * 命中片段（#23），按 slug 组织：展示字段由 MySQL 补齐，路由据此把高亮合并回同一条目。
+   * 高亮只是附加信息，不参与排序；没有任何片段时是空 Map。
+   */
+  highlights: ReadonlyMap<string, ProductHighlight>
 }
 
 /**
@@ -49,11 +54,30 @@ export interface ProductSuggestionQuery {
   limit: number
 }
 
-/** 商品联想条目（#22）：本票只返 slug / name / brand，不含高亮（#23）。 */
+/**
+ * 命中片段（#23）：按字段组织，每个片段是一段可直接渲染的文本——
+ * 命中部分用固定 `<em>` 包裹，原文里的 HTML 已被转义成实体。
+ * 未命中的字段不出现（不是空数组）；三个字段都未命中时整个对象不出现。
+ */
+export interface ProductHighlight {
+  name?: string[]
+  brand?: string[]
+  model?: string[]
+}
+
+/** 联想条目的高亮（#23）：只覆盖 name / brand，与联想条目自身的字段集一致。 */
+export interface ProductSuggestionHighlight {
+  name?: string[]
+  brand?: string[]
+}
+
+/** 商品联想条目（#22、#23）：slug / name / brand，命中时附加可选高亮。 */
 export interface ProductSuggestionItem {
   slug: string
   name: string
   brand: string
+  /** 命中片段（#23）；没有片段时不出现该字段。 */
+  highlight?: ProductSuggestionHighlight
 }
 
 export interface ProductSuggestionResult {

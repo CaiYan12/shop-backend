@@ -1,5 +1,6 @@
 import {
   SearchUnavailableError,
+  type ProductHighlight,
   type ProductSearchAdapter,
   type ProductSearchQuery,
   type ProductSearchResult,
@@ -22,6 +23,8 @@ export class FakeProductSearchAdapter implements ProductSearchAdapter {
   readonly suggestionQueries: ProductSuggestionQuery[] = []
   hits: number[] = []
   total: number | undefined = undefined
+  /** 命中片段（#23）：按 slug 组织，模拟 ES 返回的 highlight，路由据此合并回条目。 */
+  highlights = new Map<string, ProductHighlight>()
   items: ProductSuggestionItem[] = []
   failure: Error | undefined = undefined
 
@@ -30,6 +33,7 @@ export class FakeProductSearchAdapter implements ProductSearchAdapter {
     this.suggestionQueries.length = 0
     this.hits = []
     this.total = undefined
+    this.highlights = new Map()
     this.items = []
     this.failure = undefined
   }
@@ -46,6 +50,7 @@ export class FakeProductSearchAdapter implements ProductSearchAdapter {
     return {
       total: this.total ?? this.hits.length,
       productIds: this.hits.slice(start, start + query.pageSize),
+      highlights: this.highlights,
     }
   }
 

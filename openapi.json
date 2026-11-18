@@ -165,6 +165,83 @@
           }
         }
       },
+      "ProductHighlight": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "brand": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "model": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ProductSearchListItem": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name",
+          "brand",
+          "model",
+          "category",
+          "displayPriceCents",
+          "displayOriginalPriceCents",
+          "soldOut",
+          "rating",
+          "sales",
+          "coverImage"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "brand": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "category": {
+            "$ref": "#/components/schemas/ProductCategory"
+          },
+          "displayPriceCents": {
+            "type": "integer"
+          },
+          "displayOriginalPriceCents": {
+            "type": "integer"
+          },
+          "soldOut": {
+            "type": "boolean"
+          },
+          "rating": {
+            "type": "number"
+          },
+          "sales": {
+            "type": "integer"
+          },
+          "coverImage": {
+            "$ref": "#/components/schemas/ProductCoverImage"
+          },
+          "highlight": {
+            "$ref": "#/components/schemas/ProductHighlight"
+          }
+        }
+      },
       "ProductListResponse": {
         "type": "object",
         "required": [
@@ -190,7 +267,7 @@
           "items": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ProductListItem"
+              "$ref": "#/components/schemas/ProductSearchListItem"
             }
           }
         }
@@ -205,6 +282,23 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ProductListItem"
+            }
+          }
+        }
+      },
+      "ProductSuggestionHighlight": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "brand": {
+            "type": "array",
+            "items": {
+              "type": "string"
             }
           }
         }
@@ -225,6 +319,9 @@
           },
           "brand": {
             "type": "string"
+          },
+          "highlight": {
+            "$ref": "#/components/schemas/ProductSuggestionHighlight"
           }
         }
       },
