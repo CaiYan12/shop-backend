@@ -45,12 +45,37 @@ export interface ProductListPage {
 }
 
 /**
+ * 列表行的字段投影（D67）：MySQL 直查与关键词命中补齐共用一份，
+ * 避免同一组展示字段在两处各写一遍、日后改一处漏一处。
+ */
+function listRowProjection (db: Database) {
+  const summary = productSummaryQuery(db).as('product_summary')
+  return {
+    summary,
+    selection: {
+      productId: products.id,
+      slug: products.slug,
+      name: products.name,
+      brand: products.brand,
+      model: products.model,
+      categorySlug: categories.slug,
+      categoryName: categories.name,
+      displayPrice: summary.displayPrice,
+      displayOriginalPrice: summary.displayOriginalPrice,
+      soldOut: summary.soldOut,
+      rating: products.rating,
+      sales: products.sales,
+    },
+  }
+}
+
+/**
  * 在派生查询外层组合筛选与排序（D61）：
  * 展示价以元存储，经 `priceCentsSql` 换算成整数分后再比较，DECIMAL 运算不引入浮点误差；
  * 排序在展示价或销量之后统一追加商品 id 升序，保证翻页稳定。
  */
 function buildListQuery (db: Database, query: ProductListQuery) {
-  const summary = productSummaryQuery(db).as('product_summary')
+  const { summary, selection } = listRowProjection(db)
 
   const conditions: SQL[] = []
   if (query.category !== undefined) {
@@ -67,20 +92,7 @@ function buildListQuery (db: Database, query: ProductListQuery) {
   }
 
   const filtered = db
-    .select({
-      productId: products.id,
-      slug: products.slug,
-      name: products.name,
-      brand: products.brand,
-      model: products.model,
-      categorySlug: categories.slug,
-      categoryName: categories.name,
-      displayPrice: summary.displayPrice,
-      displayOriginalPrice: summary.displayOriginalPrice,
-      soldOut: summary.soldOut,
-      rating: products.rating,
-      sales: products.sales,
-    })
+    .select(selection)
     .from(products)
     .innerJoin(categories, eq(categories.id, products.categoryId))
     .innerJoin(summary, eq(summary.productId, products.id))
@@ -154,4 +166,33 @@ export async function selectProductListPage (
       coverImage: covers.get(row.productId) ?? null,
     })),
   }
+}
+
+/**
+ * 按商品 id 批量取列表行（#21、ADR 0002）：关键词命中与顺序由 Elasticsearch 给出，
+ * 展示字段仍以 MySQL 为权威，用与列表同一条派生查询补齐。
+ *
+ * - 返回 Map 而不是数组：顺序由调用方按命中顺序决定，不受 IN 查询返回顺序影响；
+ * - 封面图一律为 null，由调用方用 `selectCoverImages` 补齐（与相关推荐同一条路径）；
+ * - 命中在 MySQL 缺失时不会凭空补出条目，由调用方按数据完整性异常处理。
+ */
+export async function selectProductListRowsByIds (
+  db: Database,
+  productIds: number[],
+): Promise<Map<number, ProductListRow>> {
+  const rows = new Map<number, ProductListRow>()
+  if (productIds.length === 0) return rows
+
+  const { summary, selection } = listRowProjection(db)
+  const found = await db
+    .select(selection)
+    .from(products)
+    .innerJoin(categories, eq(categories.id, products.categoryId))
+    .innerJoin(summary, eq(summary.productId, products.id))
+    .where(inArray(products.id, productIds))
+
+  for (const row of found) {
+    rows.set(row.productId, { ...row, coverImage: null })
+  }
+  return rows
 }

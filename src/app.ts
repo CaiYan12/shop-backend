@@ -12,6 +12,7 @@ import { registerCategoryRoutes } from './routes/categories.ts'
 import { registerProductRoutes } from './routes/products.ts'
 import { registerPurchaseCheckRoutes } from './routes/purchase-check.ts'
 import { registerProductSchemas } from './schemas/product.ts'
+import type { ProductSearchAdapter } from './search/product-search.ts'
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -19,6 +20,8 @@ declare module 'fastify' {
     db: Database
     /** 由应用工厂注入的配置；应用工厂自身不读环境文件。 */
     config: AppConfig
+    /** 由应用工厂注入的搜索能力端口；测试注入假实现，生产装配 ES 适配器（#21）。 */
+    productSearch: ProductSearchAdapter
   }
 }
 
@@ -27,6 +30,11 @@ export interface CreateAppOptions {
   db: Database
   /** 已解析的配置；应用工厂不读环境文件。 */
   config: AppConfig
+  /**
+   * 搜索能力端口（#21）：与数据库句柄一样由调用方装配。
+   * 生产入口注入 Elasticsearch 适配器，测试注入假实现，因此默认套件不依赖 ES。
+   */
+  search: ProductSearchAdapter
   /** 是否输出请求日志；测试默认关闭。 */
   logger?: boolean
 }
@@ -115,11 +123,13 @@ function registerErrorHandler (app: AppInstance): void {
 export async function createApp ({
   db,
   config,
+  search,
   logger = false,
 }: CreateAppOptions): Promise<AppInstance> {
   const app = buildFastify({ logger })
   app.decorate('db', db)
   app.decorate('config', config)
+  app.decorate('productSearch', search)
 
   // 文档插件必须先于业务路由注册，才能收集到路由 schema（D64）。
   await app.register(swagger, {

@@ -1,8 +1,16 @@
 import { Client } from '@elastic/elasticsearch'
-import type { MappingTypeMapping } from '@elastic/elasticsearch/lib/api/types'
+import type {
+  MappingTypeMapping,
+  QueryDslQueryContainer,
+  SearchHit,
+  SearchRequest,
+  SearchResponse,
+} from '@elastic/elasticsearch/lib/api/types'
+import type { ProductListSort } from '../db/product-list.ts'
 import {
   PRODUCT_INDEX_DEFINITION,
   PRODUCT_INDEX_PREFIX,
+  PRODUCTS_ALIAS,
   productIndexVersion,
 } from './index-mapping.ts'
 import type {
@@ -10,6 +18,12 @@ import type {
   IndexBulkOperation,
   ProductIndexAdapter,
 } from './index-rebuild.ts'
+import {
+  SearchUnavailableError,
+  type ProductSearchAdapter,
+  type ProductSearchQuery,
+  type ProductSearchResult,
+} from './product-search.ts'
 import type { ProductSearchDocument } from './product-snapshot.ts'
 
 export interface ElasticsearchClientOptions {
@@ -160,3 +174,118 @@ export class ElasticsearchProductIndexAdapter implements ProductIndexAdapter {
     }
   }
 }
+
+/** 检索字段与权重（C61）：name^3、model^3、brand^2、categoryName^1；不设 fuzziness，即关闭模糊匹配。 */
+const PRODUCT_SEARCH_FIELDS = ['name^3', 'model^3', 'brand^2', 'categoryName^1']
+
+/**
+ * 端口排序 → ES 排序（D61、C49）：
+ * - 未显式指定排序：相关性（_score）优先，同分追加 productId 升序；
+ * - 三种显式排序：价格升序 / 价格降序 / 销量降序，同值同样追加 productId 升序。
+ * 追加 productId 是为了翻页稳定：ES 默认的平分次序依赖分片内部文档号，重建后会变。
+ */
+function buildProductSearchSort (sort: ProductListSort | undefined): SearchRequest['sort'] {
+  const byProductId = { productId: { order: 'asc' as const } }
+  if (sort === 'price_asc') return [{ displayPriceCents: { order: 'asc' as const } }, byProductId]
+  if (sort === 'price_desc') return [{ displayPriceCents: { order: 'desc' as const } }, byProductId]
+  if (sort === 'sales_desc') return [{ sales: { order: 'desc' as const } }, byProductId]
+  return [{ _score: { order: 'desc' as const } }, byProductId]
+}
+
+/**
+ * 端口筛选 → ES 过滤（C38、D61）：筛选走 bool.filter，不参与打分；
+ * 价格用 displayPriceCents（映射为 long），销量用 sales，商品类型用 categorySlug 精确匹配。
+ */
+function buildProductSearchQuery (query: ProductSearchQuery): SearchRequest['query'] {
+  const filters: QueryDslQueryContainer[] = []
+  if (query.category !== undefined) {
+    filters.push({ term: { categorySlug: query.category } })
+  }
+  const priceRange: { gte?: number, lte?: number } = {}
+  if (query.priceMinCents !== undefined) priceRange.gte = query.priceMinCents
+  if (query.priceMaxCents !== undefined) priceRange.lte = query.priceMaxCents
+  if (priceRange.gte !== undefined || priceRange.lte !== undefined) {
+    filters.push({ range: { displayPriceCents: priceRange } })
+  }
+  if (query.minSales !== undefined) {
+    filters.push({ range: { sales: { gte: query.minSales } } })
+  }
+
+  return {
+    bool: {
+      must: [{
+        multi_match: {
+          query: query.keyword,
+          type: 'best_fields',
+          operator: 'or',
+          fields: PRODUCT_SEARCH_FIELDS,
+        },
+      }],
+      ...(filters.length === 0 ? {} : { filter: filters }),
+    },
+  }
+}
+
+/**
+ * 命中文档只取 productId（ADR 0002）：展示字段一律回 MySQL 补齐。
+ * 缺 productId 说明索引映射与查询契约不一致，属程序错误，不能映射成「不可用」。
+ */
+function readSearchProductId (hit: SearchHit): number {
+  const source = hit._source as { productId?: unknown } | undefined
+  const value = source?.productId
+  if (typeof value !== 'number') {
+    throw new Error(`搜索命中的文档 ${hit._id ?? ''} 缺少 productId，索引映射与查询契约不一致。`)
+  }
+  return value
+}
+
+/**
+ * 4xx（除索引 / 别名不存在）说明请求本身不合法，是程序错误，原样上抛走 500；
+ * 连接失败、超时、索引未就绪与其它 5xx 一律视为服务不可用，映射为 503。
+ */
+function toSearchUnavailable (error: unknown): Error {
+  const status = statusCodeOf(error)
+  if (status !== undefined && status >= 400 && status < 500 && status !== 404) {
+    return error instanceof Error ? error : new Error(String(error))
+  }
+  return new SearchUnavailableError('搜索服务暂时不可用。', { cause: error })
+}
+
+/**
+ * 在线搜索适配器（#21）：把端口上的结构化条件翻译成 ES 请求。
+ * 对外只认别名 `products`（ADR 0003），不直接指向物理索引。
+ */
+export class ElasticsearchProductSearchAdapter implements ProductSearchAdapter {
+  private readonly client: Client
+
+  constructor (client: Client) {
+    this.client = client
+  }
+
+  async search (query: ProductSearchQuery): Promise<ProductSearchResult> {
+    const request: SearchRequest = {
+      index: PRODUCTS_ALIAS,
+      // D60：总数必须精确，不能被相关性阈值截断成 10000+。
+      track_total_hits: true,
+      from: (query.page - 1) * query.pageSize,
+      size: query.pageSize,
+      _source: ['productId'],
+      query: buildProductSearchQuery(query),
+      sort: buildProductSearchSort(query.sort),
+    }
+
+    let response: SearchResponse
+    try {
+      response = await this.client.search(request)
+    } catch (error) {
+      throw toSearchUnavailable(error)
+    }
+
+    const { total } = response.hits
+    return {
+      total: typeof total === 'number' ? total : total?.value ?? 0,
+      productIds: response.hits.hits.map(readSearchProductId),
+    }
+  }
+}
+

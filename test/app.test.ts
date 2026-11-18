@@ -6,6 +6,7 @@ import { Type } from 'typebox'
 import { createApp, type AppInstance } from '../src/app.ts'
 import { createDb, createPool } from '../src/db/client.ts'
 import { AppError } from '../src/errors.ts'
+import { FakeProductSearchAdapter } from './helpers/fake-search-adapter.ts'
 import { loadTestConfig } from './helpers/test-config.ts'
 
 const config = loadTestConfig()
@@ -14,7 +15,7 @@ let app: AppInstance
 
 before(async () => {
   pool = createPool(config)
-  app = await createApp({ db: createDb(pool), config })
+  app = await createApp({ db: createDb(pool), config, search: new FakeProductSearchAdapter() })
   // 探针路由：只用于观察应用工厂装配出的校验与错误映射，不出现在文档里。
   app.get('/__probe/query', {
     schema: {
@@ -169,7 +170,11 @@ test('超过 bodyLimit 的请求体返回 413 与 VALIDATION_FAILED', async () =
 
 test('应用关闭只释放自身资源：不关闭调用方持有的连接池', async () => {
   const ownedPool = createPool(config)
-  const ownedApp = await createApp({ db: createDb(ownedPool), config })
+  const ownedApp = await createApp({
+    db: createDb(ownedPool),
+    config,
+    search: new FakeProductSearchAdapter(),
+  })
   try {
     await ownedApp.ready()
     await ownedApp.close()

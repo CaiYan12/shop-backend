@@ -1,16 +1,27 @@
 import type { FastifyRequest } from 'fastify'
-import { Type } from 'typebox'
+import { Type, type Static } from 'typebox'
 import type { AppInstance } from '../app.ts'
 import {
   selectProductDetail,
   selectProductImages,
   selectProductVariants,
 } from '../db/product-detail.ts'
-import { selectCoverImages, selectProductListPage, PRODUCT_LIST_SORTS, type ProductListSort } from '../db/product-list.ts'
+import {
+  selectCoverImages,
+  selectProductListPage,
+  selectProductListRowsByIds,
+  PRODUCT_LIST_SORTS,
+  type ProductListSort,
+} from '../db/product-list.ts'
 import { selectProductRecommendations } from '../db/product-recommendations.ts'
 import { selectProductSummaries } from '../db/product-summary.ts'
 import { AppError } from '../errors.ts'
 import { yuanToCents } from '../money.ts'
+import {
+  SearchUnavailableError,
+  type ProductSearchQuery,
+  type ProductSearchResult,
+} from '../search/product-search.ts'
 import { ProductSlugParams } from '../schemas/product.ts'
 
 /** 相关推荐固定取 4 件（D66）：同类优先，不足时从其他商品类型补足。 */
@@ -79,6 +90,80 @@ function toListItem (
   }
 }
 
+/** 列表查询的静态类型：helper 与 handler 共用同一份 schema 推导。 */
+type ListProductsQueryType = Static<typeof ListProductsQuery>
+
+/**
+ * 调用搜索端口（#21、C37）：只传结构化条件，路由不感知查询 DSL。
+ * 端口把「连不上 / 超时 / 索引未就绪」封装成 SearchUnavailableError，这里映射为 503；
+ * 其它异常保持 500，避免把程序错误伪装成「稍后重试」。
+ */
+async function searchProductHits (
+  app: AppInstance,
+  query: ProductSearchQuery,
+): Promise<ProductSearchResult> {
+  try {
+    return await app.productSearch.search(query)
+  } catch (error) {
+    if (error instanceof SearchUnavailableError) {
+      throw new AppError('SEARCH_NOT_AVAILABLE', '搜索服务暂时不可用，请稍后重试。')
+    }
+    throw error
+  }
+}
+
+/**
+ * 关键词路径（#21、ADR 0002）：命中与顺序由搜索端口给出，展示字段回 MySQL 按命中顺序补齐。
+ * 补齐与 MySQL 路径共用同一条派生查询，因此展示价、展示原价、售罄、评分、销量、封面图
+ * 的含义与无关键词浏览完全一致（11 个字段相同）。
+ */
+async function listProductsByKeyword (
+  app: AppInstance,
+  query: ListProductsQueryType,
+  keyword: string,
+  page: number,
+  pageSize: number,
+) {
+  const result = await searchProductHits(app, {
+    keyword,
+    category: query.category,
+    priceMinCents: query.priceMinCents,
+    priceMaxCents: query.priceMaxCents,
+    minSales: query.minSales,
+    // 只有显式指定三种排序时才是具体值；未指定保持 undefined，由搜索侧按相关性排序。
+    sort: query.sort,
+    page,
+    pageSize,
+  })
+
+  const [rowsById, covers] = await Promise.all([
+    selectProductListRowsByIds(app.db, result.productIds),
+    selectCoverImages(app.db, result.productIds),
+  ])
+
+  const items = result.productIds.map((productId) => {
+    const row = rowsById.get(productId)
+    if (row === undefined) {
+      // ES 文档是重建时的快照（ADR 0002）：命中在 MySQL 缺失说明索引已过期，属数据完整性异常。
+      throw new Error(`搜索命中的商品 ${productId} 不在数据库中，请重建商品索引。`)
+    }
+    const coverImage = covers.get(productId)
+    if (coverImage === undefined) {
+      // D67：封面图必填，无图属数据完整性异常。
+      throw new Error(`商品 ${row.slug} 缺少封面图，列表无法渲染。`)
+    }
+    return toListItem(row, row, coverImage)
+  })
+
+  return {
+    page,
+    pageSize,
+    total: result.total,
+    totalPages: result.total === 0 ? 0 : Math.ceil(result.total / pageSize),
+    items,
+  }
+}
+
 /** 商品列表路由（D58）：挂载在应用工厂内、文档插件之后。 */
 function registerListProductsRoute (app: AppInstance): void {
   app.get('/api/products', {
@@ -105,16 +190,17 @@ function registerListProductsRoute (app: AppInstance): void {
       ])
     }
 
-    // Phase 3 关键词搜索尚未接入（D69）：非空关键词明确返回 503。
-    if (query.keyword !== undefined && query.keyword !== '') {
-      throw new AppError('SEARCH_NOT_AVAILABLE', '关键词搜索尚未接入。')
-    }
-
     // TypeBoxValidatorCompiler 只做 Convert + Check，不应用 schema 的 default，
-    // 所以这三处兜底不是死代码（见 docs/typebox-notes.md）。
-    const sort: ProductListSort = query.sort ?? 'sales_desc'
+    // 所以这两处兜底不是死代码（见 docs/typebox-notes.md）。
     const page = query.page ?? 1
     const pageSize = query.pageSize ?? 8
+
+    // 有无关键词分流（#21、C37）：trim 后为空串或纯空白时走 MySQL，行为与 Phase 3 一致。
+    if (query.keyword !== undefined && query.keyword !== '') {
+      return listProductsByKeyword(app, query, query.keyword, page, pageSize)
+    }
+
+    const sort: ProductListSort = query.sort ?? 'sales_desc'
 
     const { rows, total } = await selectProductListPage(app.db, {
       category: query.category,

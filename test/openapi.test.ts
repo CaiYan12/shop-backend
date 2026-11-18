@@ -6,6 +6,7 @@ import { createApp, type AppInstance } from '../src/app.ts'
 import { createDb, createPool } from '../src/db/client.ts'
 import { ERROR_CODES } from '../src/errors.ts'
 import { OPENAPI_FILE, serializeOpenApiDocument } from '../src/openapi.ts'
+import { FakeProductSearchAdapter } from './helpers/fake-search-adapter.ts'
 import { loadTestConfig } from './helpers/test-config.ts'
 
 const config = loadTestConfig()
@@ -14,7 +15,7 @@ let app: AppInstance
 
 before(async () => {
   pool = createPool(config)
-  app = await createApp({ db: createDb(pool), config })
+  app = await createApp({ db: createDb(pool), config, search: new FakeProductSearchAdapter() })
   await app.ready()
 })
 
@@ -297,7 +298,11 @@ test('请求 schema 内联：请求体不引用命名组件', async () => {
 
 test('servers 反映实际配置端口', async () => {
   const customPort = 4123
-  const customApp = await createApp({ db: createDb(pool), config: { ...config, port: customPort } })
+  const customApp = await createApp({
+    db: createDb(pool),
+    config: { ...config, port: customPort },
+    search: new FakeProductSearchAdapter(),
+  })
   try {
     await customApp.ready()
     const doc = customApp.swagger() as unknown as OpenApiDocument

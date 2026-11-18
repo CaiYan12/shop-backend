@@ -4,6 +4,17 @@ import { loadConfig } from './config.ts'
 import { createDb, createPool } from './db/client.ts'
 import { OPENAPI_FILE, serializeOpenApiDocument } from './openapi.ts'
 import { runIfMain } from './run-if-main.ts'
+import { SearchUnavailableError, type ProductSearchAdapter } from './search/product-search.ts'
+
+/**
+ * 契约生成不检索：装配一个一律「不可用」的占位端口，
+ * 避免生成文档时为了满足装配要求去连 Elasticsearch。
+ */
+const noSearch: ProductSearchAdapter = {
+  async search () {
+    throw new SearchUnavailableError('契约生成不使用搜索能力。')
+  },
+}
 
 /**
  * 生成可提交的 OpenAPI 契约产物（D64）：构建应用 → `ready()` → `swagger()` → 写出文件。
@@ -14,7 +25,7 @@ import { runIfMain } from './run-if-main.ts'
 async function generateOpenApi (): Promise<{ file: string, pathCount: number }> {
   const config = loadConfig()
   const pool = createPool(config)
-  const app = await createApp({ db: createDb(pool), config })
+  const app = await createApp({ db: createDb(pool), config, search: noSearch })
 
   try {
     await app.ready()
