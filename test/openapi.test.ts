@@ -53,9 +53,10 @@ interface OpenApiDocument {
   components?: { schemas?: Record<string, SchemaObject> }
 }
 
-/** 五个业务路径与约定的 operationId（D58、D64）；健康检查与文档路由不计入。 */
+/** 六个业务路径与约定的 operationId（D58、D64）；健康检查与文档路由不计入。 */
 const BUSINESS_OPERATIONS: ReadonlyArray<readonly [string, string, string]> = [
   ['get', '/api/products', 'listProducts'],
+  ['get', '/api/products/suggestions', 'listSuggestions'],
   ['get', '/api/products/{slug}', 'getProduct'],
   ['get', '/api/products/{slug}/recommendations', 'listRecommendations'],
   ['get', '/api/categories', 'listCategories'],
@@ -75,6 +76,8 @@ const COMPONENT_NAMES = [
   'ProductListItem',
   'ProductListResponse',
   'ProductRecommendationsResponse',
+  'ProductSuggestionItem',
+  'ProductSuggestionsResponse',
   'ProductVariant',
   'PurchaseCheckProduct',
   'PurchaseCheckResponse',
@@ -87,6 +90,7 @@ const COMPONENT_NAMES = [
  */
 const ERROR_RESPONSES: Readonly<Record<string, readonly string[]>> = {
   listProducts: ['400', '500', '503'],
+  listSuggestions: ['400', '500', '503'],
   getProduct: ['400', '404', '500'],
   listRecommendations: ['400', '404', '500'],
   listCategories: ['500'],
@@ -142,14 +146,14 @@ test('文档插件注册成功：swagger() 可取出 3.1.0 文档', async () => 
   assert.deepEqual(doc.tags?.map((tag) => tag.name), ['商品', '商品类型', '购买校验'])
 })
 
-test('恰好 5 个业务路径，operationId 与约定一致', async () => {
+test('恰好 6 个业务路径，operationId 与约定一致', async () => {
   const doc = document()
   const paths = Object.keys(doc.paths ?? {})
 
   assert.deepEqual(
     paths.slice().sort(),
     BUSINESS_OPERATIONS.map(([, path]) => path).sort(),
-    '业务路径应恰好是约定的五个；健康检查与文档路由不应进入契约',
+    '业务路径应恰好是约定的六个；健康检查与文档路由不应进入契约',
   )
   assert.equal(paths.includes('/health'), false, '健康检查不应进入契约路径')
   assert.equal(paths.includes('/openapi.json'), false, '文档路由不应进入契约路径')

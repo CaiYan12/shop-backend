@@ -9,7 +9,7 @@ import { loadTestConfig } from './test-config.ts'
 
 /**
  * 集成测试共用的「迁移 + 种子 + 应用工厂」生命周期。
- * 五个接口测试文件原本各写一份 before/after，逻辑只在这里维护。
+ * 各接口测试文件原本各写一份 before/after，逻辑只在这里维护。
  */
 export interface SeededApp {
   pool: Pool

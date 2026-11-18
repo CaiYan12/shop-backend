@@ -1,6 +1,6 @@
 # TypeBox 与 Fastify 集成笔记
 
-本文件记录三条会反复踩到的行为，供实现与审查共用。领域词汇见 `GLOSSARY.md`。
+本文件记录四条会反复踩到的行为，供实现与审查共用。领域词汇见 `GLOSSARY.md`。
 
 ## 1. `TypeBoxValidatorCompiler` 不应用 schema 的 `default`
 
@@ -23,3 +23,11 @@
 
 `@fastify/swagger` 的 `convertConstToEnum` 默认 `true`，会把 `Type.Literal` 转成单值 `enum`，
 **与 OpenAPI 版本无关**。要保留 `const` 必须显式设 `convertConstToEnum: false`（见 `src/app.ts`）。
+
+## 4. `Value.Convert` 会把小数字面量截断成整数
+
+查询参数默认先经 `Value.Convert`：`Type.Integer` 会把字符串 `"2.5"` 截断成 `2`，再通过
+`minimum` / `maximum` 与整数校验。因此 schema 上的「整数」约束对 `2.5` 这类字面量不生效。
+
+需要严格整数语义时，在 `preValidation` 里先按原始字符串校验（如 `/^[0-9]+$/`），再交给
+schema 做范围检查。商品联想接口的 `limit` 就是这样处理的（#22）。

@@ -14,6 +14,9 @@ const noSearch: ProductSearchAdapter = {
   async search () {
     throw new SearchUnavailableError('契约生成不使用搜索能力。')
   },
+  async suggest () {
+    throw new SearchUnavailableError('契约生成不使用搜索能力。')
+  },
 }
 
 /**
