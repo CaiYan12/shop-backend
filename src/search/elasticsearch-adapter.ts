@@ -95,19 +95,56 @@ function describeAliasAction (action: AliasActionRequest): string {
   return '(未知动作)'
 }
 
+/** 真实 ES 的单项 action_result：`{ add|remove: { status, error? } }`。 */
+interface AliasActionResultPayload {
+  status?: unknown
+  error?: unknown
+}
+
+function isSuccessStatus (status: number): boolean {
+  return status >= 200 && status < 300
+}
+
 /**
- * action_results 与请求里的 actions 一一对应，false 表示该项失败（第三轮复审）。
- * 只报 acknowledged / errors 两个布尔无法定位是哪一项失败，这里把失败动作与序号带进消息。
+ * 解析单项 action_result（第四轮复审）。
+ *
+ * 真实 ES 返回对象数组，例如 { add: { status: 200 } } /
+ * { remove: { status: 404, error: {...} } }；旧实现只识别布尔 false，
+ * 真实 404 因此被当成成功。这里同时兼容布尔形式（测试桩），
+ * 失败原因统一带上动作类型、目标索引与状态码。
  */
-function describeFailedAliasActions (actions: AliasActionRequest[], actionResults: unknown): string {
-  if (!Array.isArray(actionResults)) return ''
+function describeFailedAliasAction (
+  action: AliasActionRequest | undefined,
+  result: unknown,
+): string | undefined {
+  const actionText = action === undefined ? '(未知动作)' : describeAliasAction(action)
+  if (result === true) return undefined
+  if (result === false) return `${actionText}（布尔 false，无状态码）`
+  if (typeof result !== 'object' || result === null) return undefined
+  const record = result as Record<string, AliasActionResultPayload>
+  const kind = action?.add !== undefined ? 'add' : action?.remove !== undefined ? 'remove' : undefined
+  const payload = kind === undefined ? undefined : record[kind]
+  if (payload === undefined) return undefined
+  const status = typeof payload.status === 'number' ? payload.status : undefined
+  const failure = status === undefined || !isSuccessStatus(status) || payload.error !== undefined
+  if (!failure) return undefined
+  const statusText = status === undefined ? '未知状态码' : `状态码 ${status}`
+  const errorText = payload.error === undefined ? '' : `，错误 ${JSON.stringify(payload.error)}`
+  return `${actionText}（${statusText}${errorText}）`
+}
+
+/** 收集失败的别名动作；与请求里的 actions 一一对应。 */
+function describeFailedAliasActions (
+  actions: AliasActionRequest[],
+  actionResults: unknown,
+): string[] {
+  if (!Array.isArray(actionResults)) return []
   const failed: string[] = []
   actionResults.forEach((result, index) => {
-    if (result !== false) return
-    const action = actions[index]
-    failed.push(`第 ${index + 1} 项 ${action === undefined ? '(未知动作)' : describeAliasAction(action)}`)
+    const detail = describeFailedAliasAction(actions[index], result)
+    if (detail !== undefined) failed.push(`第 ${index + 1} 项 ${detail}`)
   })
-  return failed.join('、')
+  return failed
 }
 
 interface BulkItemPayload {
@@ -238,16 +275,16 @@ export class ElasticsearchProductIndexAdapter implements ProductIndexAdapter {
       ...remove.map((index) => ({ remove: { index, alias } })),
     ]
     if (actions.length === 0) return
-    const response: { acknowledged?: boolean, errors?: boolean, action_results?: boolean[] } =
+    const response: { acknowledged?: boolean, errors?: boolean, action_results?: unknown } =
       await this.client.indices.updateAliases({ actions })
-    // HTTP 200 也可能只是受理了请求：未确认或带错误时按失败处理，
+    // HTTP 200 也可能只是受理了请求：未确认、errors 为真或逐项非 2xx 时都按失败处理，
     // 让重建流程进入别名核对，而不是误以为未切换后删掉新索引。
-    if (response.acknowledged !== true || response.errors === true) {
-      const failedActions = describeFailedAliasActions(actions, response.action_results)
+    const failedActions = describeFailedAliasActions(actions, response.action_results)
+    if (response.acknowledged !== true || response.errors === true || failedActions.length > 0) {
       throw new Error(
         `切换别名 ${alias} 未成功：acknowledged=${String(response.acknowledged)}，` +
           `errors=${String(response.errors ?? false)}` +
-          `${failedActions === '' ? '。' : `；失败动作：${failedActions}。`}`,
+          `${failedActions.length === 0 ? '。' : `；失败动作：${failedActions.join('、')}。`}`,
       )
     }
   }

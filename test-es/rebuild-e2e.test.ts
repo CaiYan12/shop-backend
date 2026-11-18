@@ -1,5 +1,7 @@
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Client } from '@elastic/elasticsearch'
 import { rebuildProductIndex } from '../src/search/index-rebuild.ts'
 import { ElasticsearchProductIndexAdapter } from '../src/search/elasticsearch-adapter.ts'
@@ -11,6 +13,7 @@ import {
   createTestEsClient,
   type DemoIndexState,
 } from './helpers/es-fixture.ts'
+import { freePort } from '../test/helpers/free-port.ts'
 import {
   DEMO_ALIAS,
   TEST_REBUILD_ALIAS,
@@ -23,6 +26,10 @@ import {
  * 覆盖「建索引 → bulk → refresh → 全量校验 → 切别名 → 校验别名 → 冒烟 → 删旧」，
  * 并核对演示别名 products 与 products_vN 索引集合前后不变。
  */
+
+/** 测试专用互斥端口与身份记录：不占用仓库默认的 19201 与 .run 记录。 */
+const LOCK_PORT = await freePort()
+const LOCK_OWNER_PATH = join(tmpdir(), 'shop-es-rebuild-e2e-owner-' + String(process.pid) + '.json')
 
 async function rebuildIndices (client: Client): Promise<string[]> {
   try {
@@ -83,6 +90,10 @@ test('完整重建：隔离前缀下建索引、切别名、冒烟、删旧，�
     alias: TEST_REBUILD_ALIAS,
     indexPrefix: TEST_REBUILD_PREFIX,
     loadSnapshot: async () => documents,
+    lockPort: LOCK_PORT,
+    ownerPath: LOCK_OWNER_PATH,
+    // 端到端不等待默认 5 s 静默窗口；静默收敛由专用用例与假适配器覆盖。
+    settleMs: 0,
   }
 
   const first = await rebuildProductIndex(adapter, options)

@@ -7,9 +7,11 @@ import {
   AliasExclusivityError,
   IndexRebuildError,
   rebuildProductIndex,
+  settleAliasExclusiveTarget,
 } from '../src/search/index-rebuild.ts'
 import { RebuildLockError } from '../src/search/rebuild-lock.ts'
 import type { ProductSearchDocument } from '../src/search/product-snapshot.ts'
+import { freePort } from './helpers/free-port.ts'
 import { RecordingProductIndexAdapter } from './helpers/recording-index-adapter.ts'
 
 const FIXTURE: ProductSearchDocument[] = [
@@ -51,16 +53,21 @@ const FIXTURE: ProductSearchDocument[] = [
 
 const ALIAS = 'products_test'
 
-/** 默认套件不碰仓库 .run 的真实锁：每次运行用独立的临时目录。 */
+/**
+ * 默认套件不碰仓库 .run 的真实身份记录：每次运行用独立的临时目录。
+ * 互斥端口用 freePort() 取高位空闲端口，避免与其它用例或本机服务冲突。
+ */
 const LOCK_DIR = mkdtempSync(join(tmpdir(), 'shop-rebuild-lock-'))
-const LOCK_PATH = join(LOCK_DIR, 'rebuild.lock')
+const OWNER_PATH = join(LOCK_DIR, 'es-rebuild.owner.json')
 after(() => rmSync(LOCK_DIR, { recursive: true, force: true }))
 
-function run (adapter: RecordingProductIndexAdapter) {
+async function run (adapter: RecordingProductIndexAdapter) {
   return rebuildProductIndex(adapter, {
     loadSnapshot: async () => FIXTURE,
     alias: ALIAS,
-    lockPath: LOCK_PATH,
+    lockPort: await freePort(),
+    ownerPath: OWNER_PATH,
+    settleMs: 0,
   })
 }
 
@@ -81,6 +88,7 @@ test('正常重建按固定顺序执行，_id 用 slug，切换后别名指向�
     'getMapping',
     'count',
     'getDocuments',
+    'aliasIndices',
     'updateAlias',
     'aliasIndices',
     'searchTotal',
@@ -109,8 +117,9 @@ test('正常重建按固定顺序执行，_id 用 slug，切换后别名指向�
     'refresh',
     '校验映射',
     '全量校验',
+    '别名预收敛',
     '切换别名',
-    '校验别名',
+    '静默与别名收敛',
     '冒烟查询',
     '删除旧物理索引',
   ])
@@ -124,7 +133,9 @@ test('可配置物理索引前缀：命名与扫描都在隔离前缀内，默�
     loadSnapshot: async () => FIXTURE,
     alias: ALIAS,
     indexPrefix,
-    lockPath: LOCK_PATH,
+    lockPort: await freePort(),
+    ownerPath: OWNER_PATH,
+    settleMs: 0,
   })
 
   assert.equal(result.index, 'products_es_test_rebuild_v1')
@@ -193,7 +204,7 @@ test('连续重建两次：文档内容一致，别名指向新版本并删除�
   assert.deepEqual(secondSwitch.remove, ['products_v1'])
 })
 
-test('切换别名后冒烟查询失败时回滚到旧索引', async () => {
+test('切换别名后冒烟查询失败：回滚到旧索引，但按新规则保留新索引', async () => {
   const adapter = new RecordingProductIndexAdapter()
   await run(adapter)
   adapter.smokeTotal = 0
@@ -201,11 +212,19 @@ test('切换别名后冒烟查询失败时回滚到旧索引', async () => {
   await assert.rejects(run(adapter), (error: unknown) => {
     assert.ok(error instanceof IndexRebuildError)
     assert.match(error.message, /冒烟查询没有命中/)
+    assert.match(error.message, /别名已回滚/)
+    assert.match(error.message, /尝试过切换就不删除/)
+    assert.match(error.message, /products_v2/)
     return true
   })
 
   assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v1'])
-  assert.equal(adapter.indices.has('products_v2'), false)
+  assert.equal(adapter.indices.has('products_v2'), true, '尝试过切换后新索引必须保留')
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'deleteIndex' && step.index === 'products_v2'),
+    false,
+    '回滚成功也不得删除新索引',
+  )
 })
 
 test('切换别名后失败且回滚失败时，保留别名仍指向的新索引并提示人工检查', async () => {
@@ -333,8 +352,8 @@ test('P1-A：别名切换已生效但调用抛异常时，保留仍被别名引�
   )
   assert.equal(
     adapter.steps.filter((step) => step.name === 'aliasIndices').length,
-    2,
-    'catch 必须重新核对别名，不能依赖本地的 aliasSwitched',
+    3,
+    '初始读取、建前收敛与 catch 复查各一次（不能依赖本地的 aliasSwitched）',
   )
 })
 
@@ -464,17 +483,10 @@ class MultiTargetAliasAdapter extends RecordingProductIndexAdapter {
   }
 }
 
-function runWithLock (adapter: RecordingProductIndexAdapter, lockName: string) {
-  return rebuildProductIndex(adapter, {
-    loadSnapshot: async () => FIXTURE,
-    alias: ALIAS,
-    lockPath: join(LOCK_DIR, lockName),
-  })
-}
 
 test('切换后别名出现两个目标：先收敛为唯一目标，重建继续成功', async () => {
   const adapter = new MultiTargetAliasAdapter()
-  const result = await runWithLock(adapter, 'converge.lock')
+  const result = await run(adapter)
 
   assert.equal(result.index, 'products_v1')
   assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? new Set<string>())], ['products_v1'])
@@ -487,8 +499,8 @@ test('切换后别名出现两个目标：先收敛为唯一目标，重建继�
   assert.deepEqual(convergence.remove, ['products_v9'], '一次请求移除全部多余目标')
   assert.equal(
     adapter.steps.filter((step) => step.name === 'aliasIndices').length,
-    3,
-    '切换后查询一次、收敛后再复查一次',
+    4,
+    '初始读取、建前收敛、切换后复查、收敛后再复查各一次',
   )
   assert.equal(
     adapter.steps.some((step) => step.name === 'deleteIndex'),
@@ -501,7 +513,7 @@ test('收敛后仍有两个目标：失败、不删除任何索引，并报告�
   const adapter = new MultiTargetAliasAdapter()
   adapter.ignoreConvergence = true
 
-  await assert.rejects(runWithLock(adapter, 'converge-ineffective.lock'), (error: unknown) => {
+  await assert.rejects(run(adapter), (error: unknown) => {
     assert.ok(error instanceof AliasExclusivityError)
     assert.match(error.message, /别名目标不唯一/)
     assert.match(error.message, /products_v1/)
@@ -526,7 +538,7 @@ test('收敛请求失败：失败并报告当前目标，不删除任何索引',
   const adapter = new MultiTargetAliasAdapter()
   adapter.convergenceFailure = new Error('模拟的收敛请求失败')
 
-  await assert.rejects(runWithLock(adapter, 'converge-error.lock'), (error: unknown) => {
+  await assert.rejects(run(adapter), (error: unknown) => {
     assert.ok(error instanceof AliasExclusivityError)
     assert.match(error.message, /模拟的收敛请求失败/)
     assert.match(error.message, /products_v1/)
@@ -542,22 +554,35 @@ test('收敛请求失败：失败并报告当前目标，不删除任何索引',
   )
 })
 
-test('并发：同一锁路径下两个重建只有一个成功，另一个因锁立即失败', async () => {
+test('并发：同一互斥端口下两个重建只有一个成功，另一个立即失败', async () => {
   const adapter = new RecordingProductIndexAdapter()
-  const lockPath = join(LOCK_DIR, 'concurrent.lock')
-  const options = { loadSnapshot: async () => FIXTURE, alias: ALIAS, lockPath }
+  const lockPort = await freePort()
+  const ownerFile = join(LOCK_DIR, 'concurrent.owner.json')
+  const options = {
+    loadSnapshot: async () => FIXTURE,
+    alias: ALIAS,
+    lockPort,
+    ownerPath: ownerFile,
+    settleMs: 0,
+  }
 
-  // 第一次调用在返回 Promise 前已同步取得锁；第二次立刻看到持有者仍在。
+  // 第一次调用在返回 Promise 前已发起端口监听；第二次立刻看到 EADDRINUSE。
   const first = rebuildProductIndex(adapter, options)
   const second = rebuildProductIndex(adapter, options)
   const outcomes = await Promise.allSettled([first, second])
 
-  assert.equal(outcomes[0]?.status, 'fulfilled', '先取得锁的重建应成功')
-  assert.equal(outcomes[1]?.status, 'rejected', '第二个重建必须因锁失败')
+  assert.equal(outcomes[0]?.status, 'fulfilled', '先取得互斥的重建应成功')
+  assert.equal(outcomes[1]?.status, 'rejected', '第二个重建必须因端口占用失败')
   const rejection = outcomes[1]?.status === 'rejected' ? outcomes[1].reason : undefined
   assert.ok(rejection instanceof RebuildLockError)
-  assert.ok(rejection.message.includes(lockPath), '错误消息必须指出锁文件位置')
-  assert.ok(rejection.message.includes(String(process.pid)), '错误消息必须指出持锁进程')
+  assert.ok(
+    rejection.message.includes('127.0.0.1:' + String(lockPort)),
+    '错误消息必须指出互斥端口',
+  )
+  assert.ok(
+    rejection.message.includes('netstat -ano | findstr :' + String(lockPort)),
+    '错误消息必须给出排查命令',
+  )
 
   const result = outcomes[0]?.status === 'fulfilled' ? outcomes[0].value : undefined
   assert.ok(result !== undefined)
@@ -566,6 +591,172 @@ test('并发：同一锁路径下两个重建只有一个成功，另一个因�
     [result.index],
     '成功者结束后别名恰好一个目标',
   )
-  assert.equal(existsSync(lockPath), false, '重建结束后必须释放锁')
+  assert.equal(existsSync(ownerFile), false, '重建结束后必须删除诊断记录')
   assert.equal(adapter.indices.size, 1, '失败方不得创建索引')
+})
+
+test('建前收敛：别名多目标时收敛到版本号最大的现存索引，再继续重建', async () => {
+  const adapter = new RecordingProductIndexAdapter()
+  await adapter.createIndex('products_v1')
+  await adapter.createIndex('products_v2')
+  await adapter.updateAlias(ALIAS, ['products_v1', 'products_v2'], [])
+  adapter.steps.length = 0
+
+  const result = await run(adapter)
+
+  assert.equal(result.index, 'products_v3')
+  assert.deepEqual(result.previousIndices, ['products_v2'], '切换时只移除收敛后的实际目标')
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v3'])
+
+  const aliasSteps = adapter.steps.filter((step) => step.name === 'updateAlias')
+  assert.equal(aliasSteps.length, 2, '一次建前收敛 + 一次切换')
+  const convergence = aliasSteps[0]
+  assert.equal(convergence?.name, 'updateAlias')
+  if (convergence?.name !== 'updateAlias') throw new Error('缺少建前收敛的 updateAlias')
+  assert.deepEqual(convergence.add, [])
+  assert.deepEqual(convergence.remove, ['products_v1'], '只移除版本号较小的目标')
+  assert.deepEqual(result.deletedIndices, ['products_v2'], '只删除被替换的旧目标')
+  assert.equal(adapter.indices.has('products_v1'), true, '收敛只改别名，不删除索引')
+})
+
+test('发布后静默窗口：迟到的旧目标在静默期间加回，复查后收敛为唯一目标', async () => {
+  const adapter = new RecordingProductIndexAdapter()
+  let injected = false
+
+  const result = await rebuildProductIndex(adapter, {
+    loadSnapshot: async () => FIXTURE,
+    alias: ALIAS,
+    lockPort: await freePort(),
+    ownerPath: OWNER_PATH,
+    settleMs: 5,
+    sleep: async () => {
+      if (injected) return
+      injected = true
+      // 模拟另一个进程在静默窗口内迟到地 add 一个旧目标。
+      await adapter.updateAlias(ALIAS, ['products_v9'], [])
+    },
+  })
+
+  assert.equal(result.index, 'products_v1')
+  assert.equal(injected, true, '静默窗口必须被调用')
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v1'])
+  const aliasSteps = adapter.steps.filter((step) => step.name === 'updateAlias')
+  const convergence = aliasSteps.at(-1)
+  assert.equal(convergence?.name, 'updateAlias')
+  if (convergence?.name !== 'updateAlias') throw new Error('缺少收敛用的 updateAlias')
+  assert.deepEqual(convergence.remove, ['products_v9'])
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'deleteIndex'),
+    false,
+    '静默收敛只改别名，不删除任何索引',
+  )
+})
+
+/**
+ * 模拟「收敛请求成功后，下一次复查 aliasIndices 抛一般错误」：
+ * 旧实现在这里会回滚并删除新索引；新规则只允许保留。
+ */
+class RecheckAfterConvergeFailureAdapter extends RecordingProductIndexAdapter {
+  private converged = false
+
+  override async updateAlias (alias: string, add: string[], remove: string[]): Promise<void> {
+    await super.updateAlias(alias, add, remove)
+    if (add.length > 0) {
+      // 切换成功后，另一个重建的迟到 add 让别名出现第二个目标。
+      await super.updateAlias(alias, ['products_v9'], [])
+      return
+    }
+    if (remove.includes('products_v9')) this.converged = true
+  }
+
+  override async aliasIndices (alias: string): Promise<string[]> {
+    if (this.converged) {
+      this.converged = false
+      throw new Error('模拟的收敛后复查失败')
+    }
+    return await super.aliasIndices(alias)
+  }
+}
+
+test('收敛后复查抛一般错误：切换已尝试，保留新索引且不调用 deleteIndex', async () => {
+  const adapter = new RecheckAfterConvergeFailureAdapter()
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /模拟的收敛后复查失败/)
+    assert.match(error.message, /已回滚/)
+    assert.match(error.message, /尝试过切换就不删除/)
+    assert.match(error.message, /products_v1/)
+    return true
+  })
+
+  assert.equal(adapter.indices.has('products_v1'), true, '新索引必须保留')
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'deleteIndex'),
+    false,
+    '尝试过切换后任何异常路径都不得调用 deleteIndex',
+  )
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], [], '回滚移除新索引后别名无目标')
+})
+
+/** 忽略收敛请求的别名桩：用来验证轮数耗尽后的失败路径。 */
+class StubbornAliasAdapter extends RecordingProductIndexAdapter {
+  override async updateAlias (alias: string, add: string[], remove: string[]): Promise<void> {
+    if (add.length === 0 && remove.length > 0) {
+      this.steps.push({ name: 'updateAlias', alias, add: [...add], remove: [...remove] })
+      return
+    }
+    await super.updateAlias(alias, add, remove)
+  }
+}
+
+test('收敛函数：别名多目标时收敛到版本号最大的现存索引，不删除索引', async () => {
+  const adapter = new RecordingProductIndexAdapter()
+  await adapter.createIndex('products_v1')
+  await adapter.createIndex('products_v2')
+  await adapter.createIndex('products_v5')
+  await adapter.updateAlias(ALIAS, ['products_v1', 'products_v5', 'products_v2'], [])
+  adapter.steps.length = 0
+
+  const result = await settleAliasExclusiveTarget(adapter, {
+    alias: ALIAS,
+    indexPrefix: 'products_v',
+    settleMs: 0,
+    maxRounds: 1,
+  })
+
+  assert.equal(result.target, 'products_v5')
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v5'])
+  assert.deepEqual([...result.removed].sort(), ['products_v1', 'products_v2'])
+  assert.equal(adapter.steps.some((step) => step.name === 'deleteIndex'), false)
+})
+
+test('收敛函数：收敛后仍多目标时失败且不删除任何索引', async () => {
+  const adapter = new StubbornAliasAdapter()
+  await adapter.createIndex('products_v1')
+  await adapter.createIndex('products_v2')
+  await adapter.updateAlias(ALIAS, ['products_v1', 'products_v2'], [])
+  adapter.steps.length = 0
+
+  await assert.rejects(
+    settleAliasExclusiveTarget(adapter, {
+      alias: ALIAS,
+      indexPrefix: 'products_v',
+      expectedIndex: 'products_v1',
+      settleMs: 0,
+      maxRounds: 2,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof AliasExclusivityError)
+      assert.match(error.message, /仍不唯一/)
+      assert.match(error.message, /products_v1/)
+      assert.match(error.message, /products_v2/)
+      return true
+    },
+  )
+  assert.equal(adapter.steps.some((step) => step.name === 'deleteIndex'), false)
+  assert.deepEqual(
+    [...(adapter.aliases.get(ALIAS) ?? new Set<string>())].sort(),
+    ['products_v1', 'products_v2'],
+  )
 })

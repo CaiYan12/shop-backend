@@ -1,329 +1,231 @@
-import { randomUUID } from 'node:crypto'
-import {
-  closeSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeSync,
-} from 'node:fs'
+import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createServer, type Server } from 'node:net'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /**
- * 重建互斥锁（第三轮复审）。
+ * 重建互斥（第四轮复审）：互斥由操作系统持有的资源表示——绑定本机回环端口。
  *
  * 同一台机器上同时跑两次重建时，两次都会读到相同的旧索引集合、各自 add 自己的新索引，
- * 别名因此同时指向两个物理索引，HTTP 列表出现重复条目。文件名锁把重建串成一条：
- * 取得锁才能开始，成功与异常两条路径都在 finally 里释放。
+ * 别名因此同时指向两个物理索引，HTTP 列表出现重复条目。互斥把重建串成一条。
  *
- * 锁记录 pid、进程启动时间与可执行路径（与 scripts/es-stop.mjs 的归属校验同一风格）：
- * - 持有者进程仍存活 → 立即失败，消息里给出持有者与锁文件位置；
- * - 持有者已消失 → 视为过期，重命名隔离后清理并接管；
- * - pid 被别的进程复用时，启动时间或可执行路径与记录不符，同样按过期处理。
+ * 为什么用端口而不是锁文件：文件锁要靠「读文件判断持有者是否存活」来接管过期锁，
+ * 「判断」与「接管」之间仍是竞态（旧持有者恰好复活、两个进程同时判过期等）。
+ * 端口由内核保证独占：listen 成功即持有，进程退出时操作系统关闭 socket，
+ * 因此不存在过期锁，也不存在接管流程。EADDRINUSE 就是「已有重建在跑」，本次立即失败。
  *
- * 默认路径相对仓库根解析（<repo>/.run/es-rebuild.lock，已 gitignore），不依赖 cwd；
- * 测试注入临时路径即可。
+ * .run/es-rebuild.owner.json 只是诊断用的身份记录（pid、进程启动时间、可执行路径、
+ * 端口、获取时间）；它不参与互斥，写失败也不影响已经取得的端口持有。
+ *
+ * 默认端口 19201，可由构造参数或环境变量 ES_REBUILD_LOCK_PORT 覆盖。
+ * 默认记录路径 <仓库根>/.run/es-rebuild.owner.json（已 gitignore），不依赖 cwd。
  */
 
 /** 仓库根：src/search 与 dist/search 都是两级目录，因此本表达式两者通用。 */
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url))
 
-/** 取得锁的最大尝试次数：覆盖「刚释放」「刚清理过期锁」两类竞争。 */
-const MAX_ACQUIRE_ATTEMPTS = 3
+/** 只绑本机回环：不暴露到局域网，也不依赖防火墙规则。 */
+const LOOPBACK_HOST = '127.0.0.1'
+
+/** 默认互斥端口；刻意避开 ES 9201、测试 ES 9301 与服务端 3001。 */
+export const DEFAULT_REBUILD_LOCK_PORT = 19201
+
+/** 覆盖默认互斥端口的环境变量。 */
+export const REBUILD_LOCK_PORT_ENV = 'ES_REBUILD_LOCK_PORT'
 
 /** 当前进程的启动时间：用「现在 - 已运行时长」估算，同一进程内恒定。 */
 const PROCESS_START_TIME = new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString()
 
 export interface RebuildProcessIdentity {
   pid: number
-  /** 进程启动时间（UTC ISO）；用来识别 PID 复用。 */
+  /** 进程启动时间（UTC ISO）；与可执行路径一起用于人工核对身份记录。 */
   startTime: string
-  /** 可执行路径；用来佐证持有者身份。 */
+  /** 可执行路径。 */
   execPath: string
 }
 
 export interface RebuildLockOwner extends RebuildProcessIdentity {
-  /** 取得锁的时间（UTC ISO）。 */
+  /** 持有的回环端口。 */
+  port: number
+  /** 取得互斥的时间（UTC ISO）。 */
   acquiredAt: string
-  /** 本次获取的唯一标记：释放时只删自己写的那份锁。 */
-  token: string
-}
-
-/** 进程探针：默认实现只读取当前进程的身份，测试可注入。 */
-export interface RebuildLockProcessProbe {
-  isAlive (pid: number): boolean
-  /** 读取指定进程的启动时间与可执行路径；无法读取时返回 null。 */
-  processInfo (pid: number): { startTime: string | null, execPath: string | null } | null
 }
 
 export interface RebuildLockOptions {
-  /** 锁文件路径；默认 <仓库根>/.run/es-rebuild.lock。 */
-  lockPath?: string
+  /** 互斥端口；默认 19201，再被 ES_REBUILD_LOCK_PORT 覆盖。 */
+  port?: number
+  /** 诊断身份记录路径；默认 <仓库根>/.run/es-rebuild.owner.json。 */
+  ownerPath?: string
   /** 当前进程身份；测试注入。 */
   identity?: RebuildProcessIdentity
-  /** 进程探针；测试注入。 */
-  probe?: RebuildLockProcessProbe
   /** 当前时间；测试注入。 */
   now?: () => number
 }
 
 export interface RebuildLock {
-  readonly path: string
+  /** 本次持有的回环端口。 */
+  readonly port: number
+  /** 诊断身份记录路径。 */
+  readonly ownerPath: string
   readonly owner: RebuildLockOwner
-  /** 接管前清理掉的过期持有者；没有接管时为 undefined。 */
-  readonly recoveredFrom?: RebuildLockOwner
-  /** 幂等释放；只删除自己写的那份锁。 */
-  release (): void
+  /** 身份记录写失败时的说明；写失败不影响互斥。 */
+  readonly ownerRecordWarning?: string
+  /** 幂等释放：关闭监听端口并删除自己的诊断记录。 */
+  release (): Promise<void>
 }
 
-/** 重建锁失败：持有者仍在、锁文件损坏或清理过期锁失败。 */
+/** 重建互斥失败：端口已被占用、无法绑定或端口参数非法。 */
 export class RebuildLockError extends Error {
-  readonly lockPath: string
+  readonly port: number | undefined
 
-  constructor (message: string, lockPath: string, options?: ErrorOptions) {
+  constructor (message: string, options: ErrorOptions & { port?: number } = {}) {
     super(message, options)
     this.name = 'RebuildLockError'
-    this.lockPath = lockPath
+    this.port = options.port
   }
 }
-
-/** 默认锁文件：仓库根的 .run 目录（已 gitignore），不依赖启动时的 cwd。 */
-export function defaultRebuildLockPath (): string {
-  return join(REPO_ROOT, '.run', 'es-rebuild.lock')
-}
-
-/** 默认探针：用 process.kill(pid, 0) 判存活；只有当前进程能读到启动时间与可执行路径。 */
-export const defaultRebuildLockProbe: RebuildLockProcessProbe = {
-  isAlive (pid) {
-    try {
-      process.kill(pid, 0)
-      return true
-    } catch (error) {
-      // Windows 上权限不足同样说明进程存在，只有 ESRCH 才是已消失。
-      const code = (error as NodeJS.ErrnoException).code
-      return code === 'EPERM' || code === 'EACCES'
-    }
-  },
-  processInfo (pid) {
-    if (pid !== process.pid) return null
-    return { startTime: PROCESS_START_TIME, execPath: process.execPath }
-  },
-}
-
-type HolderStatus = 'held-by-self' | 'held-by-other' | 'stale'
 
 function describeError (error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function describeOwner (owner: RebuildLockOwner): string {
-  return `pid=${owner.pid}，启动时间=${owner.startTime}，可执行路径=${owner.execPath}，获取时间=${owner.acquiredAt}`
-}
-
-/** Windows 路径统一大小写与分隔符后再比较。 */
-function sameExecPath (left: string, right: string): boolean {
-  if (typeof left !== 'string' || typeof right !== 'string') return false
-  return left.replace(/\//g, '\\').toLowerCase() === right.replace(/\//g, '\\').toLowerCase()
-}
-
-function invalidLock (lockPath: string, reason: string, cause?: unknown): RebuildLockError {
-  return new RebuildLockError(
-    `重建锁 ${lockPath} 存在但内容无法解析（${reason}）：可能是写入中断或手工改动。` +
-      '为避免两个重建同时改别名，本次立即失败；请确认没有重建在跑后删除该文件再重试。',
-    lockPath,
-    cause === undefined ? undefined : { cause },
-  )
-}
-
-function parseLockOwner (lockPath: string, raw: string): RebuildLockOwner {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch (error) {
-    throw invalidLock(lockPath, describeError(error), error)
+function assertLockPort (port: number): void {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new RebuildLockError('重建互斥端口必须是 1–65535 的整数，当前值无法使用。')
   }
-  if (typeof parsed !== 'object' || parsed === null) throw invalidLock(lockPath, '不是 JSON 对象')
-  const record = parsed as Partial<RebuildLockOwner>
-  const pid = record.pid
-  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
-    throw invalidLock(lockPath, 'pid 不是正整数')
-  }
-  const { startTime, execPath, acquiredAt, token } = record
-  if (typeof startTime !== 'string' || startTime === '') throw invalidLock(lockPath, '缺少 startTime')
-  if (typeof execPath !== 'string' || execPath === '') throw invalidLock(lockPath, '缺少 execPath')
-  if (typeof acquiredAt !== 'string' || acquiredAt === '') throw invalidLock(lockPath, '缺少 acquiredAt')
-  if (typeof token !== 'string' || token === '') throw invalidLock(lockPath, '缺少 token')
-  return { pid, startTime, execPath, acquiredAt, token }
 }
 
-/** 读取锁文件；不存在时返回 undefined（调用方重试创建）。 */
-function readLockFile (lockPath: string): RebuildLockOwner | undefined {
-  let raw: string
-  try {
-    raw = readFileSync(lockPath, 'utf8')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+/** 默认互斥端口：显式环境变量优先；非法值直接失败，不静默回退。 */
+export function defaultRebuildLockPort (env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[REBUILD_LOCK_PORT_ENV]?.trim()
+  if (raw === undefined || raw === '') return DEFAULT_REBUILD_LOCK_PORT
+  const port = Number(raw)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new RebuildLockError(
-      `无法读取重建锁 ${lockPath}：${describeError(error)}。`,
-      lockPath,
-      { cause: error },
+      `${REBUILD_LOCK_PORT_ENV} 必须是 1–65535 的整数，当前值无法使用。`,
     )
   }
-  return parseLockOwner(lockPath, raw)
+  return port
 }
 
-/** 用 'wx' 独占创建锁文件：已存在时返回 false，成功时返回 true。 */
-function writeLockOwner (lockPath: string, owner: RebuildLockOwner): boolean {
-  let fd: number
-  try {
-    fd = openSync(lockPath, 'wx')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
-    throw new RebuildLockError(
-      `无法创建重建锁 ${lockPath}：${describeError(error)}。`,
-      lockPath,
-      { cause: error },
-    )
-  }
-  try {
-    writeSync(fd, `${JSON.stringify(owner, null, 2)}\n`)
-  } catch (error) {
-    try {
-      closeSync(fd)
-    } catch {}
-    try {
-      unlinkSync(lockPath)
-    } catch {}
-    throw new RebuildLockError(
-      `写入重建锁 ${lockPath} 失败：${describeError(error)}。`,
-      lockPath,
-      { cause: error },
-    )
-  }
-  closeSync(fd)
-  return true
+/** 默认诊断记录：仓库根的 .run 目录（已 gitignore），不依赖启动时的 cwd。 */
+export function defaultRebuildLockOwnerPath (): string {
+  return join(REPO_ROOT, '.run', 'es-rebuild.owner.json')
 }
 
-/** 判定现有锁的持有者：仍被自己 / 仍是别人 / 已过期（可接管）。 */
-function assessHolder (
-  existing: RebuildLockOwner,
-  identity: RebuildProcessIdentity,
-  probe: RebuildLockProcessProbe,
-): HolderStatus {
-  if (existing.pid === identity.pid) {
-    // 同一 PID：启动时间与可执行路径都一致才算「本进程持有」；否则是 PID 被复用后的过期锁。
-    return existing.startTime === identity.startTime && sameExecPath(existing.execPath, identity.execPath)
-      ? 'held-by-self'
-      : 'stale'
-  }
-  if (!probe.isAlive(existing.pid)) return 'stale'
-  const info = probe.processInfo(existing.pid)
-  // 读不到其它进程的身份时保守处理：存活即视为仍持有。
-  if (info === null) return 'held-by-other'
-  if (info.startTime !== null && info.startTime !== existing.startTime) return 'stale'
-  if (info.execPath !== null && !sameExecPath(info.execPath, existing.execPath)) return 'stale'
-  return 'held-by-other'
+/**
+ * 绑定回环端口；成功即取得互斥。
+ * EADDRINUSE 表示同机已有重建持有该端口：立即失败并给出端口与排查命令。
+ */
+function bindLoopbackPort (port: number): Promise<Server> {
+  return new Promise((resolve, reject) => {
+    const server = createServer()
+    const onError = (error: NodeJS.ErrnoException): void => {
+      server.removeListener('listening', onListening)
+      if (error.code === 'EADDRINUSE') {
+        reject(
+          new RebuildLockError(
+            `重建互斥端口 ${port} 已被占用（127.0.0.1:${port}）：已有一次索引重建在运行。` +
+              '本次重建不等待，立即失败；请等它结束后重试。' +
+              `若确认没有重建在跑，用 netstat -ano | findstr :${port} 查看占用进程并结束它。`,
+            { cause: error, port },
+          ),
+        )
+        return
+      }
+      reject(
+        new RebuildLockError(
+          `无法绑定重建互斥端口 127.0.0.1:${port}` +
+            `（${error.code ?? describeError(error)}）：${describeError(error)}。`,
+          { cause: error, port },
+        ),
+      )
+    }
+    const onListening = (): void => {
+      server.removeListener('error', onError)
+      // 监听成功后保留一个空错误监听，避免迟到的 error 事件让进程崩溃。
+      server.on('error', () => {})
+      resolve(server)
+    }
+    server.once('error', onError)
+    server.once('listening', onListening)
+    server.listen({ host: LOOPBACK_HOST, port, exclusive: true })
+  })
 }
 
-class FileRebuildLock implements RebuildLock {
-  readonly path: string
+class LoopbackPortRebuildLock implements RebuildLock {
+  readonly port: number
+  readonly ownerPath: string
   readonly owner: RebuildLockOwner
-  readonly recoveredFrom?: RebuildLockOwner
+  readonly ownerRecordWarning?: string
+  private readonly server: Server
   private released = false
 
-  constructor (path: string, owner: RebuildLockOwner, recoveredFrom?: RebuildLockOwner) {
-    this.path = path
+  constructor (
+    server: Server,
+    ownerPath: string,
+    owner: RebuildLockOwner,
+    ownerRecordWarning?: string,
+  ) {
+    this.server = server
+    this.ownerPath = ownerPath
     this.owner = owner
-    this.recoveredFrom = recoveredFrom
+    this.ownerRecordWarning = ownerRecordWarning
+    this.port = owner.port
   }
 
-  release (): void {
+  async release (): Promise<void> {
     if (this.released) return
     this.released = true
-    let current: RebuildLockOwner | undefined
+    // 先关闭端口：关闭完成即表示互斥已释放，后续重建可以立即取得。
+    await new Promise<void>((resolve) => {
+      this.server.close(() => resolve())
+    })
     try {
-      current = readLockFile(this.path)
+      unlinkSync(this.ownerPath)
     } catch {
-      // 锁文件损坏或不可读：不在这里覆盖或删除别人的记录。
-      return
-    }
-    if (current === undefined || current.token !== this.owner.token) return
-    try {
-      unlinkSync(this.path)
-    } catch {
-      // 释放失败留给下一次获取时的存活检查报告，不覆盖调用方的原始错误。
+      // 记录只是诊断信息：不存在或删除失败都不影响互斥。
     }
   }
 }
 
 /**
- * 取得重建锁；被存活进程持有或锁文件损坏时立即失败。
- * 过期锁用 rename 原子隔离后再删除，避免两个进程同时 unlink 对方的锁。
+ * 取得重建互斥：绑定 127.0.0.1:<port>。
+ *
+ * 成功后把身份写入 ownerPath 供人工排查；身份记录不参与互斥，
+ * 因此已存在旧记录会被直接覆盖，写入失败也只记录一条 warning。
  */
-export function acquireRebuildLock (options: RebuildLockOptions = {}): RebuildLock {
-  const lockPath = options.lockPath ?? defaultRebuildLockPath()
+export async function acquireRebuildLock (
+  options: RebuildLockOptions = {},
+): Promise<RebuildLock> {
+  const port = options.port ?? defaultRebuildLockPort()
+  assertLockPort(port)
+  const ownerPath = options.ownerPath ?? defaultRebuildLockOwnerPath()
   const identity = options.identity ?? {
     pid: process.pid,
     startTime: PROCESS_START_TIME,
     execPath: process.execPath,
   }
-  const probe = options.probe ?? defaultRebuildLockProbe
   const now = options.now ?? Date.now
-  mkdirSync(dirname(lockPath), { recursive: true })
 
-  let recoveredFrom: RebuildLockOwner | undefined
-  for (let attempt = 1; attempt <= MAX_ACQUIRE_ATTEMPTS; attempt += 1) {
-    const owner: RebuildLockOwner = {
-      pid: identity.pid,
-      startTime: identity.startTime,
-      execPath: identity.execPath,
-      acquiredAt: new Date(now()).toISOString(),
-      token: randomUUID(),
-    }
-    if (writeLockOwner(lockPath, owner)) return new FileRebuildLock(lockPath, owner, recoveredFrom)
-
-    const existing = readLockFile(lockPath)
-    // 另一个进程在读取前刚释放：直接重试创建。
-    if (existing === undefined) continue
-
-    const status = assessHolder(existing, identity, probe)
-    if (status === 'held-by-self') {
-      throw new RebuildLockError(
-        `重建锁 ${lockPath} 已被当前进程持有（${describeOwner(existing)}）：同一进程内不能同时跑两个重建。` +
-          '请等待正在执行的重建结束后重试。',
-        lockPath,
-      )
-    }
-    if (status === 'held-by-other') {
-      throw new RebuildLockError(
-        `重建锁 ${lockPath} 已被占用：${describeOwner(existing)}。` +
-          `持有者进程 ${existing.pid} 仍在运行，本次重建立即失败；请等待它结束后重试。` +
-          '若确认该进程已不存在，可删除锁文件后重试。',
-        lockPath,
-      )
-    }
-
-    const quarantine = `${lockPath}.stale-${process.pid}-${randomUUID()}`
-    try {
-      renameSync(lockPath, quarantine)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
-      throw new RebuildLockError(
-        `重建锁 ${lockPath} 的持有者已消失，但清理过期锁失败：${describeError(error)}。`,
-        lockPath,
-        { cause: error },
-      )
-    }
-    recoveredFrom = existing
-    try {
-      unlinkSync(quarantine)
-    } catch {}
+  const server = await bindLoopbackPort(port)
+  const owner: RebuildLockOwner = {
+    pid: identity.pid,
+    startTime: identity.startTime,
+    execPath: identity.execPath,
+    port,
+    acquiredAt: new Date(now()).toISOString(),
   }
 
-  throw new RebuildLockError(
-    `连续 ${MAX_ACQUIRE_ATTEMPTS} 次尝试仍未取得重建锁 ${lockPath}，可能有其他重建在反复抢占。`,
-    lockPath,
-  )
+  let ownerRecordWarning: string | undefined
+  try {
+    mkdirSync(dirname(ownerPath), { recursive: true })
+    writeFileSync(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, 'utf8')
+  } catch (error) {
+    ownerRecordWarning =
+      `诊断记录 ${ownerPath} 写入失败（${describeError(error)}）` +
+      `；互斥仍由 127.0.0.1:${port} 持有`
+  }
+
+  return new LoopbackPortRebuildLock(server, ownerPath, owner, ownerRecordWarning)
 }

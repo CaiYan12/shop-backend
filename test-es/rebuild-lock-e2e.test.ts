@@ -1,8 +1,8 @@
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import type { Client } from '@elastic/elasticsearch'
 import {
   ElasticsearchProductIndexAdapter,
@@ -17,20 +17,21 @@ import {
   createTestEsClient,
   type DemoIndexState,
 } from './helpers/es-fixture.ts'
+import { freePort } from '../test/helpers/free-port.ts'
 import { TEST_REBUILD_ALIAS, TEST_REBUILD_PREFIX } from './helpers/es-test-env.ts'
 
 /**
  * 第三轮复审回归：真实 ES 上的并发重建（互斥锁 + 别名唯一目标）。
  *
- * 旧实现在同一别名上并发 add 出两个目标，HTTP 列表把同一件商品返回两次
+ * 互斥现在由本机回环端口持有；旧实现在同一别名上并发 add 出两个目标，HTTP 列表把同一件商品返回两次
  * （keyword=Apple 时出现两条 airpods-max）。这里连续发起两次重建：
  * 第二次在第一个仍持锁时启动，必须立即失败；随后断言别名恰好一个目标，
  * 并用真实适配器的 HTTP /api/products?keyword=Apple 核对 slug 无重复。
  */
 
-/** 测试专用锁路径：不占用仓库默认的 .run/es-rebuild.lock。 */
-const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
-const LOCK_PATH = join(REPO_ROOT, '.run', 'es-rebuild.es-test.lock')
+/** 测试专用互斥端口与身份记录：不占用仓库默认的 19201 与 .run 记录。 */
+const LOCK_PORT = await freePort()
+const LOCK_OWNER_PATH = join(tmpdir(), 'shop-es-rebuild-owner-' + String(process.pid) + '.json')
 
 interface ListItem { slug: string }
 interface ListBody { total: number, items: ListItem[] }
@@ -69,8 +70,6 @@ async function cleanupRebuildNamespace (): Promise<void> {
 }
 
 before(async () => {
-  // 仅测试路径：清掉上次运行异常中断可能留下的锁。
-  rmSync(LOCK_PATH, { force: true })
   client = createTestEsClient()
   seeded = await createSeededApp({
     search: new ElasticsearchProductSearchAdapter(client, { alias: TEST_REBUILD_ALIAS }),
@@ -83,7 +82,6 @@ before(async () => {
 after(async () => {
   try {
     await cleanupRebuildNamespace()
-    rmSync(LOCK_PATH, { force: true })
     assertDemoIndexStateUnchanged(demoBefore, await captureDemoIndexState(client))
   } finally {
     await closeSeededApp(seeded)
@@ -97,7 +95,9 @@ test('并发重建：第二个因锁失败，别名唯一，HTTP 关键词列表
     alias: TEST_REBUILD_ALIAS,
     indexPrefix: TEST_REBUILD_PREFIX,
     loadSnapshot: async () => documents,
-    lockPath: LOCK_PATH,
+    lockPort: LOCK_PORT,
+    ownerPath: LOCK_OWNER_PATH,
+    settleMs: 0,
   }
 
   const first = rebuildProductIndex(adapter, options)
@@ -108,9 +108,15 @@ test('并发重建：第二个因锁失败，别名唯一，HTTP 关键词列表
   assert.equal(outcomes[1]?.status, 'rejected', '第二个重建必须因锁立即失败')
   const failure = outcomes[1]?.status === 'rejected' ? outcomes[1].reason : undefined
   assert.ok(failure instanceof Error, '第二个重建应抛出错误')
-  assert.match(failure.message, /重建锁/)
-  assert.ok(failure.message.includes(LOCK_PATH), '错误消息必须指出锁文件位置')
-  assert.ok(failure.message.includes(String(process.pid)), '错误消息必须指出持锁进程')
+  assert.match(failure.message, /重建互斥端口/)
+  assert.ok(
+    failure.message.includes('127.0.0.1:' + String(LOCK_PORT)),
+    '错误消息必须指出互斥端口',
+  )
+  assert.ok(
+    failure.message.includes('netstat -ano | findstr :' + String(LOCK_PORT)),
+    '错误消息必须给出排查命令',
+  )
 
   const result = outcomes[0]?.status === 'fulfilled' ? outcomes[0].value : undefined
   assert.ok(result !== undefined)
@@ -118,7 +124,7 @@ test('并发重建：第二个因锁失败，别名唯一，HTTP 关键词列表
   const targets = await adapter.aliasIndices(TEST_REBUILD_ALIAS)
   assert.equal(targets.length, 1, `别名必须恰好一个目标，实际 ${targets.join('、')}`)
   assert.deepEqual(targets, [result.index])
-  assert.equal(existsSync(LOCK_PATH), false, '重建结束后必须释放锁')
+  assert.equal(existsSync(LOCK_OWNER_PATH), false, '重建结束后必须删除诊断记录')
 
   const response = await seeded.app.inject({
     method: 'GET',
