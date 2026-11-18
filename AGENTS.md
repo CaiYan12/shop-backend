@@ -45,11 +45,14 @@ pnpm verify:images  # 校验种子引用的图片存在且归属正确
 启停（Windows）：
 
 ```bat
-start.bat           # 启动 dist/server.js，端口 3001
-stop.bat            # 停止并释放端口
+start.bat           # 拉起 Elasticsearch（已有可用实例则复用）后启动 dist/server.js，端口 3001
+stop.bat            # 停止后端并释放端口，再停止本次入口创建的 Elasticsearch
 ```
 
 - `start.bat` 依赖 `dist/server.js`，首次使用前需先 `pnpm build`。
+- Elasticsearch 由 `scripts/es-dev.mjs` 管理：先探测 `http://127.0.0.1:9201/`，可用则复用，否则拉起并等待就绪（超时输出日志末尾）。**ES 没起来不阻断后端**：普通浏览可用，关键词搜索返回 503。
+- ES 的启动记录写入 `.run/es.json`（含 pid、进程启动时间、可执行路径）。`stop.bat` 用后两项校验归属，不符时**拒绝终止**；不是本次入口创建的实例不会被停。安装位置、配置与实测记录见 `docs/es-notes.md`。
+- 直接跑 `pnpm dev` / `pnpm start` 不经过上述入口，需另行保证 Elasticsearch 已就绪。
 - 首次部署顺序：`db:create` → `db:migrate` → `db:seed` → `verify:images`。
 - 新建 worktree 的准备工作（`.env` 由人手动复制、依赖单独安装、读 `node_modules` 的路径写法、`FRONTEND_PUBLIC_DIR` 的基准）见 `docs/worktree-setup.md`。
 - 提交前由 pre-commit hook 自动跑 `type-check` / `check:terms` / `test` / `build`；`pnpm install` 时经 `prepare` 安装。
