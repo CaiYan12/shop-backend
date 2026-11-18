@@ -1,5 +1,5 @@
 import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
-import { createServer, type Server } from 'node:net'
+import { createServer, type Server, type Socket } from 'node:net'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -117,9 +117,32 @@ export function defaultRebuildLockOwnerPath (): string {
  * 绑定回环端口；成功即取得互斥。
  * EADDRINUSE 表示同机已有重建持有该端口：立即失败并给出端口与排查命令。
  */
-function bindLoopbackPort (port: number): Promise<Server> {
+interface BoundLoopbackPort {
+  server: Server
+  /** 断开当前与随后到达的全部连接；release 不等待客户端主动断开。 */
+  closeConnections: () => void
+}
+
+function bindLoopbackPort (port: number): Promise<BoundLoopbackPort> {
   return new Promise((resolve, reject) => {
     const server = createServer()
+    const sockets = new Set<Socket>()
+    let closing = false
+    // 记录每条已接受的连接：release 时逐个 destroy，不依赖客户端断开。
+    server.on('connection', (socket) => {
+      sockets.add(socket)
+      socket.once('close', () => sockets.delete(socket))
+      if (closing) socket.destroy()
+    })
+    const closeConnections = (): void => {
+      closing = true
+      // Node 26.13.1 的 net.Server 没有 closeAllConnections（实测 undefined）；
+      // 有则调用，真正的兜底是销毁记录下来的 socket。
+      const withCloseAll = server as Server & { closeAllConnections?: () => void }
+      withCloseAll.closeAllConnections?.()
+      for (const socket of sockets) socket.destroy()
+      sockets.clear()
+    }
     const onError = (error: NodeJS.ErrnoException): void => {
       server.removeListener('listening', onListening)
       if (error.code === 'EADDRINUSE') {
@@ -145,7 +168,7 @@ function bindLoopbackPort (port: number): Promise<Server> {
       server.removeListener('error', onError)
       // 监听成功后保留一个空错误监听，避免迟到的 error 事件让进程崩溃。
       server.on('error', () => {})
-      resolve(server)
+      resolve({ server, closeConnections })
     }
     server.once('error', onError)
     server.once('listening', onListening)
@@ -159,15 +182,18 @@ class LoopbackPortRebuildLock implements RebuildLock {
   readonly owner: RebuildLockOwner
   readonly ownerRecordWarning?: string
   private readonly server: Server
+  private readonly closeConnections: () => void
   private released = false
 
   constructor (
     server: Server,
+    closeConnections: () => void,
     ownerPath: string,
     owner: RebuildLockOwner,
     ownerRecordWarning?: string,
   ) {
     this.server = server
+    this.closeConnections = closeConnections
     this.ownerPath = ownerPath
     this.owner = owner
     this.ownerRecordWarning = ownerRecordWarning
@@ -177,10 +203,13 @@ class LoopbackPortRebuildLock implements RebuildLock {
   async release (): Promise<void> {
     if (this.released) return
     this.released = true
-    // 先关闭端口：关闭完成即表示互斥已释放，后续重建可以立即取得。
-    await new Promise<void>((resolve) => {
+    // 先停止接收新连接；close 的回调要等所有连接结束，不能先 await 它。
+    const closed = new Promise<void>((resolve) => {
       this.server.close(() => resolve())
     })
+    // 主动断开现存连接（含空闲的本地 TCP 客户端），否则 close 会一直等它断开。
+    this.closeConnections()
+    await closed
     try {
       unlinkSync(this.ownerPath)
     } catch {
@@ -208,7 +237,7 @@ export async function acquireRebuildLock (
   }
   const now = options.now ?? Date.now
 
-  const server = await bindLoopbackPort(port)
+  const { server, closeConnections } = await bindLoopbackPort(port)
   const owner: RebuildLockOwner = {
     pid: identity.pid,
     startTime: identity.startTime,
@@ -227,5 +256,5 @@ export async function acquireRebuildLock (
       `；互斥仍由 127.0.0.1:${port} 持有`
   }
 
-  return new LoopbackPortRebuildLock(server, ownerPath, owner, ownerRecordWarning)
+  return new LoopbackPortRebuildLock(server, closeConnections, ownerPath, owner, ownerRecordWarning)
 }

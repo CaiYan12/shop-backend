@@ -1,7 +1,7 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { createServer, type Server } from 'node:net'
+import { connect, createServer, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -38,6 +38,21 @@ function listenExternal (port: number): Promise<Server> {
 
 function closeServer (server: Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()))
+}
+
+/** release 不允许被空闲客户端的断开时机拖住：超时即判失败。 */
+async function withTimeout<T> (promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label + ' 超过 ' + String(ms) + ' ms 未完成')), ms)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 test('默认互斥端口 19201，身份记录按仓库根解析，不依赖 cwd', () => {
@@ -187,4 +202,37 @@ test('已存在的旧身份记录不参与互斥：直接取得端口并覆盖�
     await lock.release()
   }
   assert.equal(existsSync(path), false)
+})
+
+/**
+ * P2（第五轮复审）：本地 TCP 客户端连上互斥端口后不断开，
+ * 旧 release() 的 server.close(cb) 会一直等它关闭，重建进程迟迟退不出。
+ * 修复后 release 主动断开连接，1 秒内完成且端口可重新获取。
+ */
+test('已连接的空闲 TCP 客户端不阻塞 release：1 秒内释放、socket 被断开、端口可重新获取', { timeout: 5000 }, async () => {
+  const port = await freePort()
+  const path = ownerPath('idle-client.owner.json')
+  const lock = await acquireRebuildLock({ port, ownerPath: path })
+  const client: Socket = connect({ host: '127.0.0.1', port })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      client.once('connect', resolve)
+      client.once('error', reject)
+    })
+    const disconnected = new Promise<void>((resolve) => client.once('close', () => resolve()))
+
+    const started = Date.now()
+    await withTimeout(lock.release(), 1000, 'release')
+    const elapsedMs = Date.now() - started
+
+    assert.ok(elapsedMs < 1000, 'release 必须在 1 秒内完成（实际 ' + String(elapsedMs) + ' ms）')
+    await disconnected
+    assert.equal(client.destroyed, true, '服务端必须主动断开客户端连接')
+  } finally {
+    client.destroy()
+    await lock.release()
+  }
+
+  const again = await acquireRebuildLock({ port, ownerPath: path })
+  await again.release()
 })

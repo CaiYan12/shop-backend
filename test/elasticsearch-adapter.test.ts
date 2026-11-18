@@ -10,10 +10,17 @@ import { IndexAlreadyExistsError } from '../src/search/index-rebuild.ts'
  * 否则重建流程会误以为别名没有切换，进而删掉正在服务的新索引。
  */
 
+interface AliasActionResultRecord {
+  status?: number
+  error?: unknown
+  add?: { status?: number, error?: unknown, index?: string, alias?: string }
+  remove?: { status?: number, error?: unknown, index?: string, alias?: string }
+}
+
 interface UpdateAliasesResponse {
   acknowledged?: boolean
   errors?: boolean
-  action_results?: Array<boolean | Record<string, { status?: number, error?: unknown }>>
+  action_results?: Array<boolean | AliasActionResultRecord>
 }
 
 interface MappingResponse {
@@ -211,6 +218,32 @@ test('更新别名：errors=false 但逐项 404 时仍按失败处理', async ()
       assert.ok(error instanceof Error)
       assert.match(error.message, /remove products_v1 -> products/)
       assert.match(error.message, /状态码 404/)
+      return true
+    },
+  )
+})
+
+test('更新别名：外层 status 的 action_results（真实 ES）含动作、索引与状态码', async () => {
+  const stub = new StubIndicesClient()
+  // ES 9.x 实际返回：动作名下只有 index/alias，status/error 在对象外层。
+  stub.response = {
+    acknowledged: true,
+    errors: true,
+    action_results: [
+      { add: { index: 'products_v2', alias: 'products' }, status: 200 },
+      { remove: { index: 'products_v1', alias: 'products' }, status: 404 },
+    ],
+  }
+  const adapter = makeAdapter(stub)
+
+  await assert.rejects(
+    adapter.updateAlias('products', ['products_v2'], ['products_v1']),
+    (error: unknown) => {
+      assert.ok(error instanceof Error)
+      assert.match(error.message, /失败动作/)
+      assert.match(error.message, /第 2 项 remove products_v1 -> products/)
+      assert.match(error.message, /状态码 404/)
+      assert.doesNotMatch(error.message, /add products_v2/, '成功项不得出现在失败列表里')
       return true
     },
   )
