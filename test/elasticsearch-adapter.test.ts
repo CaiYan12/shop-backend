@@ -13,6 +13,7 @@ import { IndexAlreadyExistsError } from '../src/search/index-rebuild.ts'
 interface UpdateAliasesResponse {
   acknowledged?: boolean
   errors?: boolean
+  action_results?: boolean[]
 }
 
 interface MappingResponse {
@@ -150,3 +151,22 @@ test('更新别名：acknowledged=true 且无 errors 时成功，动作同时包
     ],
   })
 })
+test('更新别名：errors=true 时把 action_results 中失败的项带进错误消息', async () => {
+  const stub = new StubIndicesClient()
+  // 与请求顺序一一对应：add products_v2 成功，remove products_v1 失败。
+  stub.response = { acknowledged: true, errors: true, action_results: [true, false] }
+  const adapter = makeAdapter(stub)
+
+  await assert.rejects(
+    adapter.updateAlias('products', ['products_v2'], ['products_v1']),
+    (error: unknown) => {
+      assert.ok(error instanceof Error)
+      assert.match(error.message, /errors=true/)
+      assert.match(error.message, /失败动作/)
+      assert.match(error.message, /第 2 项 remove products_v1 -> products/)
+      assert.doesNotMatch(error.message, /add products_v2/, '成功项不得出现在失败列表里')
+      return true
+    },
+  )
+})
+
