@@ -16,10 +16,12 @@
     "db:seed": "node src/db/seed.ts",
     "verify:images": "node src/db/verify-images.ts",
     "openapi:generate": "node src/generate-openapi.ts",
+    "es:rebuild": "node src/search/rebuild-index.ts",
     "check:terms": "node scripts/check-terms.mjs",
     "prepare": "node scripts/install-hooks.mjs"
   },
   "dependencies": {
+    "@elastic/elasticsearch": "9.5.1",
     "@fastify/swagger": "9.9.5",
     "@fastify/swagger-ui": "6.1.4",
     "@fastify/type-provider-typebox": "6.3.0",
