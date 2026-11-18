@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ConfigError, DEFAULT_PORT, describeConfig, loadConfig, readConfig } from '../src/config.ts'
+import { ConfigError, DEFAULT_ES_URL, DEFAULT_PORT, describeConfig, loadConfig, readConfig } from '../src/config.ts'
 
 const baseEnv = {
   DB_HOST: '127.0.0.1',
@@ -113,4 +113,14 @@ test('describeConfig 输出连接摘要但不含密码', () => {
   assert.ok(!text.includes(baseEnv.DB_PASSWORD))
   assert.match(text, /shop_homework/)
   assert.match(text, /127\.0\.0\.1:3306/)
+})
+
+test('ES_URL 缺省为本地 9201，可覆盖并拒绝非法地址', () => {
+  assert.equal(readConfig(baseEnv).esUrl, DEFAULT_ES_URL)
+  assert.equal(
+    readConfig({ ...baseEnv, ES_URL: 'http://10.0.0.5:9201' }).esUrl,
+    'http://10.0.0.5:9201',
+  )
+  assert.throws(() => readConfig({ ...baseEnv, ES_URL: 'not-a-url' }), ConfigError)
+  assert.throws(() => readConfig({ ...baseEnv, ES_URL: 'ftp://127.0.0.1:9201' }), ConfigError)
 })

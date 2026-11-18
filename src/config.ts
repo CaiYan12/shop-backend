@@ -11,6 +11,9 @@ import { BACKEND_ROOT } from './backend-root.ts'
 
 export const DEFAULT_PORT = 3001
 
+/** Elasticsearch 默认地址（Phase 4）；可用 ES_URL 覆盖。 */
+export const DEFAULT_ES_URL = 'http://127.0.0.1:9201'
+
 /** 必须显式提供的配置项；DB_PASSWORD 允许为空（本地无口令账户）。 */
 export const REQUIRED_ENV_KEYS = ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_NAME'] as const
 
@@ -32,6 +35,8 @@ export interface DbConfig {
 export interface AppConfig {
   db: DbConfig
   port: number
+  /** Elasticsearch 节点地址；搜索与索引重建共用。 */
+  esUrl: string
 }
 
 /**
@@ -51,6 +56,22 @@ function parsePort (raw: string, key: string): number {
   const value = Number(raw)
   if (!Number.isInteger(value) || value < 1 || value > 65535) {
     throw new ConfigError(`${key} 必须是 1–65535 的整数，当前值无法使用。`)
+  }
+  return value
+}
+
+/** 校验 ES_URL：缺省为本地 9201，只接受 http/https。 */
+function parseEsUrl (raw: string | undefined): string {
+  const value = raw?.trim()
+  if (value === undefined || value === '') return DEFAULT_ES_URL
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new ConfigError('ES_URL 不是合法的 URL。')
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ConfigError('ES_URL 必须以 http:// 或 https:// 开头。')
   }
   return value
 }
@@ -76,6 +97,7 @@ export function readConfig (env: NodeJS.ProcessEnv = process.env): AppConfig {
       database: env.DB_NAME!.trim(),
     },
     port,
+    esUrl: parseEsUrl(env.ES_URL),
   }
 }
 
