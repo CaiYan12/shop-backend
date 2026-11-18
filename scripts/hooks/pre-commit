@@ -3,6 +3,10 @@
 # 为什么需要：Phase 2 里有两个真 bug 穿过了本地全绿（测试用退出码断言路径解析、种子改 sku 丢组合），
 # 都是靠人工审查才发现。这条 hook 让同类问题在提交时就被拦住。
 set -e
+echo "[pre-commit] whitespace"
+# 行尾空白与文件末尾多余空行：机械问题用检查拦，不靠人记（retro P2）。
+# .bat 的 CRLF 由 .gitattributes 负责，这里不会被误报。
+git diff --cached --check
 echo "[pre-commit] type-check"
 pnpm type-check
 echo "[pre-commit] check:terms"
