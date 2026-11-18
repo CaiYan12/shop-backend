@@ -64,6 +64,8 @@ C40 要求索引可重复全量重建、不做增量同步。重建期间不能�
 - **发布后静默窗口**：切换成功且仍持有互斥时，等待 `SETTLE_MS`（默认 5000，可注入），复查别名；多目标则收敛。最多 3 轮或直到唯一，然后才释放互斥。收敛逻辑抽成导出的 `settleAliasExclusiveTarget`，只改别名、不删索引。
 - **逐项失败按对象解析**：真实 ES 9.x 的 `action_results` 每一项把动作名（`add` / `remove`）与索引、别名放在一起，`status` / `error` 在**每项外层**，例如 `[{ add: { index: 'products_v1', alias: 'products' }, status: 200 }, { remove: { index: 'products_v2', alias: 'products' }, status: 404, error: {...} }]`。适配器优先读外层 `status` / `error`，再回退到动作名下的旧形状（`{ add: { status: 200 } }`），布尔形式也仍兼容；错误消息带动作类型、目标索引与状态码。
 
+  另外，本轮在真实 ES 上实测到的**更常见失败形态**是：`_aliases` 直接返回 HTTP 404 与 `error` 体（例如 `index_not_found_exception`），客户端随即抛错，走「保留新索引、不改别名」的安全路径。`action_results` 只出现在 HTTP 200 + `errors: true` 的部分成功场景里。
+
 ### 残余风险（A 方案接受）
 
 静默窗口结束、互斥释放之后才落地的切换请求，仍可能让别名出现两个目标；双目标可能一直持续到下一次重建的建前收敛才被消除，不是「短暂」现象。本机端口互斥只能约束同一台机器上的重建；**其它机器或绕过互斥的进程**仍可独立 `add`。
