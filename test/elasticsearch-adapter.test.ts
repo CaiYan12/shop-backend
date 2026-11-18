@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Client } from '@elastic/elasticsearch'
 import { ElasticsearchProductIndexAdapter } from '../src/search/elasticsearch-adapter.ts'
+import { IndexAlreadyExistsError } from '../src/search/index-rebuild.ts'
 
 /**
  * P1-A：更新别名是「已生效但响应丢失」的高风险点。ES 客户端在 HTTP 200 下
@@ -14,13 +15,34 @@ interface UpdateAliasesResponse {
   errors?: boolean
 }
 
+interface MappingResponse {
+  [index: string]: { mappings: { properties: Record<string, unknown> } }
+}
+
 class StubIndicesClient {
   readonly requests: unknown[] = []
   response: UpdateAliasesResponse = { acknowledged: true }
 
+  readonly createRequests: unknown[] = []
+  createError?: unknown
+
+  readonly mappingRequests: unknown[] = []
+  mappingResponse: MappingResponse = {}
+
   async updateAliases (request: unknown): Promise<UpdateAliasesResponse> {
     this.requests.push(request)
     return this.response
+  }
+
+  async create (request: unknown): Promise<unknown> {
+    this.createRequests.push(request)
+    if (this.createError !== undefined) throw this.createError
+    return { acknowledged: true }
+  }
+
+  async getMapping (request: unknown): Promise<MappingResponse> {
+    this.mappingRequests.push(request)
+    return this.mappingResponse
   }
 }
 
@@ -58,6 +80,60 @@ test('更新别名：errors=true 视为失败并抛错', async () => {
       return true
     },
   )
+})
+
+test('建索引：ES 400 resource_already_exists_exception 识别为专门错误', async () => {
+  const stub = new StubIndicesClient()
+  stub.createError = Object.assign(new Error('resource_already_exists_exception'), {
+    meta: {
+      statusCode: 400,
+      body: { error: { type: 'resource_already_exists_exception' } },
+    },
+  })
+  const adapter = makeAdapter(stub)
+
+  await assert.rejects(adapter.createIndex('products_v1'), (error: unknown) => {
+    assert.ok(error instanceof IndexAlreadyExistsError)
+    assert.equal(error.index, 'products_v1')
+    return true
+  })
+  assert.equal(stub.createRequests.length, 1)
+})
+
+test('建索引：其它 400 原样上抛，不误判为版本冲突', async () => {
+  const stub = new StubIndicesClient()
+  const failure = Object.assign(new Error('mapper_parsing_exception'), {
+    meta: { statusCode: 400, body: { error: { type: 'mapper_parsing_exception' } } },
+  })
+  stub.createError = failure
+  const adapter = makeAdapter(stub)
+
+  await assert.rejects(adapter.createIndex('products_v1'), (error: unknown) => {
+    assert.equal(error, failure)
+    assert.equal(error instanceof IndexAlreadyExistsError, false)
+    return true
+  })
+})
+
+test('回读 mapping：只保留 type / analyzer，忽略其它字段', async () => {
+  const stub = new StubIndicesClient()
+  stub.mappingResponse = {
+    products_v1: {
+      mappings: {
+        properties: {
+          name: { type: 'search_as_you_type', analyzer: 'smartcn', index: true },
+          displayPriceCents: { type: 'long' },
+        },
+      },
+    },
+  }
+  const adapter = makeAdapter(stub)
+
+  assert.deepEqual(await adapter.getMapping('products_v1'), {
+    name: { type: 'search_as_you_type', analyzer: 'smartcn' },
+    displayPriceCents: { type: 'long' },
+  })
+  assert.deepEqual(stub.mappingRequests, [{ index: 'products_v1' }])
 })
 
 test('更新别名：acknowledged=true 且无 errors 时成功，动作同时包含 add 与 remove', async () => {

@@ -1,16 +1,24 @@
-import type {
-  BulkOutcome,
-  IndexBulkOperation,
-  ProductIndexAdapter,
+import {
+  IndexAlreadyExistsError,
+  type BulkOutcome,
+  type IndexBulkOperation,
+  type IndexMapping,
+  type ProductIndexAdapter,
 } from '../../src/search/index-rebuild.ts'
 import type { ProductSearchDocument } from '../../src/search/product-snapshot.ts'
-import { PRODUCT_INDEX_PREFIX, productIndexVersion } from '../../src/search/index-mapping.ts'
+import {
+  PRODUCT_INDEX_DEFINITION,
+  PRODUCT_INDEX_PREFIX,
+  productIndexVersion,
+  type ProductIndexFieldDefinition,
+} from '../../src/search/index-mapping.ts'
 
 /** 记录型假适配器：记录调用序列，并在内存里维护索引、文档与别名。 */
 export type RecordedStep =
   | { name: 'listProductIndices' }
   | { name: 'aliasIndices', alias: string }
   | { name: 'createIndex', index: string }
+  | { name: 'getMapping', index: string }
   | { name: 'bulk', index: string, ids: string[], documents: ProductSearchDocument[] }
   | { name: 'refresh', index: string }
   | { name: 'count', index: string }
@@ -42,6 +50,12 @@ export class RecordingProductIndexAdapter implements ProductIndexAdapter {
   smokeTotal = -1
   /** 让指定的一次 updateAlias 直接失败（例如模拟回滚失败）。 */
   aliasUpdateFailure?: (attempt: { alias: string, add: string[], remove: string[] }) => Error | undefined
+  /** 模拟 bulk 与 refresh 之后实际读到的 mapping 偏离契约（P2）。 */
+  mappingOverrides: Record<string, ProductIndexFieldDefinition> = {}
+  /** 让指定索引的 createIndex 失败；返回 undefined 表示不失败（P2）。 */
+  createIndexFailure?: (index: string) => Error | undefined
+  /** 模拟并发重建：首次 createIndex 发现同名索引已被别人创建（P2）。 */
+  firstCreateConflict = false
 
   async listProductIndices (): Promise<string[]> {
     this.steps.push({ name: 'listProductIndices' })
@@ -57,8 +71,21 @@ export class RecordingProductIndexAdapter implements ProductIndexAdapter {
 
   async createIndex (index: string): Promise<void> {
     this.steps.push({ name: 'createIndex', index })
+    const failure = this.createIndexFailure?.(index)
+    if (failure !== undefined) throw failure
     if (this.indices.has(index)) throw new Error(`索引 ${index} 已存在`)
+    if (this.firstCreateConflict) {
+      this.firstCreateConflict = false
+      // 另一个重建已抢先创建同名索引：登记它，并抛专门的「已存在」错误。
+      this.indices.set(index, new Map())
+      throw new IndexAlreadyExistsError(index)
+    }
     this.indices.set(index, new Map())
+  }
+
+  async getMapping (index: string): Promise<IndexMapping> {
+    this.steps.push({ name: 'getMapping', index })
+    return { ...PRODUCT_INDEX_DEFINITION.mappings.properties, ...this.mappingOverrides }
   }
 
   async bulk (index: string, operations: IndexBulkOperation[]): Promise<BulkOutcome> {

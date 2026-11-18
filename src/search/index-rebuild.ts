@@ -1,10 +1,28 @@
 import {
+  PRODUCT_INDEX_DEFINITION,
   PRODUCT_INDEX_PREFIX,
   PRODUCTS_ALIAS,
   productIndexName,
   productIndexVersion,
 } from './index-mapping.ts'
 import type { ProductSearchDocument } from './product-snapshot.ts'
+
+/** 索引字段映射的只读视图：重建用它回读目标索引的实际 mapping（P2）。 */
+export type IndexMapping = Record<string, { type?: string, analyzer?: string }>
+
+/**
+ * 适配器识别出的「索引已存在」：ES 返回 400 resource_already_exists_exception。
+ * 并发重建选中同一版本时由此触发重新取号，而不是当成普通失败去清理索引（P2）。
+ */
+export class IndexAlreadyExistsError extends Error {
+  readonly index: string
+
+  constructor (index: string, options?: ErrorOptions) {
+    super(`索引 ${index} 已存在`, options)
+    this.name = 'IndexAlreadyExistsError'
+    this.index = index
+  }
+}
 
 /** 一次 bulk 操作：_id 固定用 slug（ADR 0003）。 */
 export interface IndexBulkOperation {
@@ -31,6 +49,8 @@ export interface ProductIndexAdapter {
   listProductIndices (): Promise<string[]>
   aliasIndices (alias: string): Promise<string[]>
   createIndex (index: string): Promise<void>
+  /** 回读索引的实际 mapping；重建在切换别名前用它校验关键字段（P2）。 */
+  getMapping (index: string): Promise<IndexMapping>
   bulk (index: string, operations: IndexBulkOperation[]): Promise<BulkOutcome>
   refresh (index: string): Promise<void>
   count (index: string): Promise<number>
@@ -80,8 +100,34 @@ export class IndexRebuildError extends Error {
 /** 全量校验逐项比对的字段（D74、ADR 0003）。 */
 const VALIDATED_FIELDS = ['productId', 'categorySlug', 'sales', 'displayPriceCents'] as const
 
+/**
+ * 切换别名前必须回读校验的关键字段（P2）。
+ * bulk 若意外对不存在的索引自动建索引，字段会退化成 ES 默认映射；
+ * 只校验 business 字段不够，必须校验类型与分析器，否则错误映射会被发布。
+ */
+const REQUIRED_MAPPING_FIELDS = [
+  'name',
+  'brand',
+  'model',
+  'displayPriceCents',
+  'productId',
+  'sales',
+  'slug',
+  'categorySlug',
+] as const
+
+/** 版本冲突最多重试次数（P2）：并发重建选中同一版本时重新取号。 */
+const MAX_VERSION_CONFLICTS = 5
+
 function describeError (error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function describeMappingField (field: { type?: string, analyzer?: string } | undefined): string {
+  if (field === undefined) return '缺失'
+  return field.analyzer === undefined
+    ? String(field.type)
+    : `${String(field.type)} + ${field.analyzer}`
 }
 
 /** bulk 即使在 HTTP 200 下也可能带 errors；逐项检查后才算成功（ADR 0003）。 */
@@ -108,11 +154,15 @@ function assertBulkSucceeded (bulk: BulkOutcome, expectedCount: number): void {
 /**
  * 全量重建商品索引（ADR 0003）。
  *
- * 固定顺序：建新物理索引 → 读快照 → bulk 逐项检查 → refresh → 全量校验
- * → 原子切换别名（同一请求 add 新 / remove 旧）→ 校验别名 → 冒烟查询 → 删旧。
+ * 固定顺序：建新物理索引 → 读快照 → bulk 逐项检查 → refresh → 校验映射
+ * → 全量校验 → 原子切换别名（同一请求 add 新 / remove 旧）→ 校验别名 → 冒烟查询 → 删旧。
  *
- * 切换别名之前的任何失败都不会触碰别名，旧索引继续服务；新索引尽力清理。
- * 切换之后的冒烟失败会先把别名回滚到旧索引，再清理新索引。
+ * 切换别名之前的任何失败都不会触碰别名，旧索引继续服务；新索引只在自己创建成功时清理。
+ * 切换请求发出后失败/结果不明时一律保留新索引（服务端可能稍后才生效，P1-B）；
+ * 切换之后的冒烟失败会先回滚别名，回滚成功且复查确认不含新索引后才清理。
+ *
+ * 并发重建可能选中同一版本：createIndex 抛 IndexAlreadyExistsError 时重新取号重试，
+ * 他人的索引在任何异常路径下都不删除（P2）。
  */
 export async function rebuildProductIndex (
   adapter: ProductIndexAdapter,
@@ -142,21 +192,54 @@ export async function rebuildProductIndex (
   })
 
   const previousIndices = [...new Set(current)]
-  const versions = [...existing, ...current]
-    .map((index) => productIndexVersion(index, indexPrefix))
-    .filter((version): version is number => version !== null)
-  const nextVersion = versions.length === 0 ? 1 : Math.max(...versions) + 1
-  const indexName = productIndexName(nextVersion, indexPrefix)
+  const nextVersionFrom = (indices: string[]): number => {
+    const versions = indices
+      .map((index) => productIndexVersion(index, indexPrefix))
+      .filter((version): version is number => version !== null)
+    return versions.length === 0 ? 1 : Math.max(...versions) + 1
+  }
+  let nextVersion = nextVersionFrom([...existing, ...current])
+  let indexName = productIndexName(nextVersion, indexPrefix)
   log(
     `[es:rebuild] 目标别名 ${alias}，新物理索引 ${indexName}` +
       `（旧索引：${previousIndices.length === 0 ? '无' : previousIndices.join('、')}）`,
   )
 
+  // 所有权（P2）：只有本次 createIndex 成功后才允许在异常路径清理它。
+  let createdIndex = false
+  // 切换尝试（P1-B）：必须在调用 updateAlias 之前置位。
+  let switchAttempted = false
+  // 切换成功（用于判断是否需要回滚）。
   let aliasSwitched = false
   const cleanupNotes: string[] = []
 
   try {
-    await runStage('建索引', () => adapter.createIndex(indexName))
+    let versionConflicts = 0
+    for (;;) {
+      indexName = productIndexName(nextVersion, indexPrefix)
+      try {
+        await runStage('建索引', () => adapter.createIndex(indexName))
+        createdIndex = true
+        break
+      } catch (error) {
+        // 并发重建的版本冲突：重新取号后重试，不是失败，更不清理任何索引。
+        if (!(error instanceof IndexAlreadyExistsError)) throw error
+        versionConflicts += 1
+        if (versionConflicts > MAX_VERSION_CONFLICTS) {
+          throw new IndexRebuildError(
+            `索引 ${indexName} 已存在，连续 ${versionConflicts} 次版本冲突，` +
+              `重试 ${MAX_VERSION_CONFLICTS} 次后放弃。`,
+            { cause: error },
+          )
+        }
+        const retryExisting = await runStage('重新读取现有索引', () => adapter.listProductIndices())
+        nextVersion = nextVersionFrom([...retryExisting, ...current])
+        log(
+          `[es:rebuild] 索引 ${indexName} 已存在（并发重建），` +
+            `重新取号 ${productIndexName(nextVersion, indexPrefix)}`,
+        )
+      }
+    }
 
     const documents = await runStage('读取 MySQL 快照', options.loadSnapshot)
     if (documents.length === 0) {
@@ -176,6 +259,22 @@ export async function rebuildProductIndex (
     assertBulkSucceeded(bulk, documents.length)
 
     await runStage('refresh', () => adapter.refresh(indexName))
+
+    // bulk + refresh 之后、切换别名之前回读实际 mapping（P2）：
+    // 即便发生意外的自动建索引，也在这里拦下，不发布错误映射。
+    await runStage('校验映射', async () => {
+      const mapping = await adapter.getMapping(indexName)
+      for (const field of REQUIRED_MAPPING_FIELDS) {
+        const expected = PRODUCT_INDEX_DEFINITION.mappings.properties[field]
+        const actual = mapping[field]
+        if (actual?.type !== expected.type || actual?.analyzer !== expected.analyzer) {
+          throw new IndexRebuildError(
+            `索引 ${indexName} 的字段 ${field} 映射与契约不一致：` +
+              `实际 ${describeMappingField(actual)}，期望 ${describeMappingField(expected)}。`,
+          )
+        }
+      }
+    })
 
     await runStage('全量校验', async () => {
       const count = await adapter.count(indexName)
@@ -202,6 +301,8 @@ export async function rebuildProductIndex (
     })
 
     // 一个 _aliases 请求同时完成 add 新索引与 remove 旧索引，避免切换空窗。
+    // 发出请求之前先置位：catch 靠它区分「从未发出」与「发出但结果不明」（P1-B）。
+    switchAttempted = true
     await runStage('切换别名', () => adapter.updateAlias(alias, [indexName], previousIndices))
     aliasSwitched = true
 
@@ -243,32 +344,47 @@ export async function rebuildProductIndex (
   } catch (error) {
     const failure = describeError(error)
     let rollbackNote = ''
+    let rollbackSucceeded = false
     if (aliasSwitched) {
       try {
         await adapter.updateAlias(alias, previousIndices, [indexName])
         aliasSwitched = false
+        rollbackSucceeded = true
         rollbackNote = '；别名已回滚到旧索引'
       } catch (rollbackError) {
         rollbackNote = `；别名回滚失败（${describeError(rollbackError)}），请人工检查别名 ${alias}`
       }
     }
 
-    // 别名切换请求可能已在服务端生效但调用方收到异常，因此不能依赖本地标志：
-    // 一律重新查询，只有「查询成功且明确不含新索引」才允许删除新索引。
+    // 双重确定（P1-B）：
+    // - 从未发出切换请求：别名不可能引用新索引，可清理；
+    // - 发出过但失败/结果不明：服务端可能稍后才让切换生效，复查不可信，一律保留；
+    // - 发出并回滚成功：复查确认不含新索引后，才可清理。
+    const switchOutcomeUncertain = switchAttempted && !rollbackSucceeded
+
     let aliasTargets: string[] | undefined
     try {
       aliasTargets = await adapter.aliasIndices(alias)
     } catch (checkError) {
       rollbackNote += `；核对别名状态失败（${describeError(checkError)}）`
     }
+    const aliasChecked = aliasTargets !== undefined
     const aliasPointsToNewIndex = aliasTargets?.includes(indexName) ?? false
-    const newIndexStillReferenced = aliasTargets === undefined || aliasPointsToNewIndex
 
     let cleanupNote = ''
-    if (newIndexStillReferenced) {
-      cleanupNote = aliasTargets === undefined
-        ? `；别名状态无法确认，新索引 ${indexName} 已保留`
-        : `；新索引 ${indexName} 仍被别名 ${alias} 引用，已保留`
+    if (!createdIndex) {
+      // 所有权（P2）：不是自己创建的索引，任何异常路径都不碰。
+      cleanupNote = `；索引 ${indexName} 不是由本次重建创建，未执行清理`
+    } else if (switchOutcomeUncertain) {
+      cleanupNote = !aliasChecked
+        ? `；切换结果不确定，别名状态无法确认，新索引 ${indexName} 已保留`
+        : aliasPointsToNewIndex
+          ? `；切换结果不确定，新索引 ${indexName} 仍被别名 ${alias} 引用，已保留`
+          : `；切换结果不确定，新索引 ${indexName} 已保留`
+    } else if (aliasPointsToNewIndex) {
+      cleanupNote = `；新索引 ${indexName} 仍被别名 ${alias} 引用，已保留`
+    } else if (!aliasChecked && switchAttempted) {
+      cleanupNote = `；别名状态无法确认，新索引 ${indexName} 已保留`
     } else {
       try {
         await adapter.deleteIndex(indexName)
@@ -278,12 +394,15 @@ export async function rebuildProductIndex (
       }
     }
 
-    // 是否已切换按查询到的真实状态表述，不用本地 aliasSwitched。
-    const prefix = aliasTargets === undefined
-      ? '索引重建失败，别名状态未知'
-      : aliasPointsToNewIndex
-        ? '索引重建失败'
-        : '索引重建失败，未切换别名'
+    const prefix = !switchAttempted
+      ? '索引重建失败，未切换别名'
+      : switchOutcomeUncertain && aliasChecked && !aliasPointsToNewIndex
+        ? '索引重建失败，别名切换结果不确定'
+        : !aliasChecked
+          ? '索引重建失败，别名状态未知'
+          : aliasPointsToNewIndex
+            ? '索引重建失败'
+            : '索引重建失败，未切换别名'
     throw new IndexRebuildError(
       `${prefix}（${failure}）${rollbackNote}${cleanupNote}。`,
       { cause: error },

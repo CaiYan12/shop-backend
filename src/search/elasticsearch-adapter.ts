@@ -13,10 +13,12 @@ import {
   PRODUCTS_ALIAS,
   productIndexVersion,
 } from './index-mapping.ts'
-import type {
-  BulkOutcome,
-  IndexBulkOperation,
-  ProductIndexAdapter,
+import {
+  IndexAlreadyExistsError,
+  type BulkOutcome,
+  type IndexBulkOperation,
+  type IndexMapping,
+  type ProductIndexAdapter,
 } from './index-rebuild.ts'
 import {
   SearchUnavailableError,
@@ -68,6 +70,19 @@ function isNotFound (error: unknown): boolean {
   return statusCodeOf(error) === 404
 }
 
+/**
+ * 「索引已存在」在 ES 是 400 + resource_already_exists_exception（P2）。
+ * 适配器把它翻译成专门的 IndexAlreadyExistsError，重建据此重新取号；
+ * 其余 400 仍是程序错误，原样上抛。
+ */
+function isResourceAlreadyExists (error: unknown): boolean {
+  if (statusCodeOf(error) !== 400 || typeof error !== 'object' || error === null) return false
+  const direct = (error as { body?: { error?: { type?: unknown } } }).body?.error?.type
+  if (direct === 'resource_already_exists_exception') return true
+  const meta = (error as { meta?: { body?: { error?: { type?: unknown } } } }).meta
+  return meta?.body?.error?.type === 'resource_already_exists_exception'
+}
+
 interface BulkItemPayload {
   _id?: string
   status?: number
@@ -111,12 +126,39 @@ export class ElasticsearchProductIndexAdapter implements ProductIndexAdapter {
   }
 
   async createIndex (index: string): Promise<void> {
-    await this.client.indices.create({
-      index,
-      settings: PRODUCT_INDEX_DEFINITION.settings,
-      // 映射常量本身不依赖客户端类型；结构由 test/index-mapping.test.ts 锁定，这里只做类型桥接。
-      mappings: PRODUCT_INDEX_DEFINITION.mappings as unknown as MappingTypeMapping,
-    })
+    try {
+      await this.client.indices.create({
+        index,
+        settings: PRODUCT_INDEX_DEFINITION.settings,
+        // 映射常量本身不依赖客户端类型；结构由 test/index-mapping.test.ts 锁定，这里只做类型桥接。
+        mappings: PRODUCT_INDEX_DEFINITION.mappings as unknown as MappingTypeMapping,
+      })
+    } catch (error) {
+      if (isResourceAlreadyExists(error)) {
+        throw new IndexAlreadyExistsError(index, { cause: error })
+      }
+      throw error
+    }
+  }
+
+  /**
+   * 回读目标索引的实际 mapping（P2）：重建在切换别名前用它校验关键字段。
+   * 只保留 type / analyzer，避免把 ES 返回的其它字段带进契约判断。
+   */
+  async getMapping (index: string): Promise<IndexMapping> {
+    const response = await this.client.indices.getMapping({ index })
+    const properties = response[index]?.mappings?.properties
+    const mapping: IndexMapping = {}
+    if (properties === undefined) return mapping
+    for (const [field, definition] of Object.entries(properties)) {
+      if (typeof definition !== 'object' || definition === null) continue
+      const record = definition as { type?: unknown, analyzer?: unknown }
+      mapping[field] = {
+        ...(typeof record.type === 'string' ? { type: record.type } : {}),
+        ...(typeof record.analyzer === 'string' ? { analyzer: record.analyzer } : {}),
+      }
+    }
+    return mapping
   }
 
   async bulk (index: string, operations: IndexBulkOperation[]): Promise<BulkOutcome> {
