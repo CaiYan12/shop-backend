@@ -64,6 +64,7 @@ test('正常重建按固定顺序执行，_id 用 slug，切换后别名指向�
     'createIndex',
     'bulk',
     'refresh',
+    'getMapping',
     'count',
     'getDocuments',
     'updateAlias',
@@ -92,6 +93,7 @@ test('正常重建按固定顺序执行，_id 用 slug，切换后别名指向�
     '读取 MySQL 快照',
     'bulk 导入',
     'refresh',
+    '校验映射',
     '全量校验',
     '切换别名',
     '校验别名',
@@ -219,6 +221,60 @@ test('切换别名后失败且回滚失败时，保留别名仍指向的新索�
 })
 
 /**
+ * P1-B（本轮复审）：切换请求已经发出，但调用方超时/异常，复查时服务端尚未生效。
+ * 此时不能把「复查显示未引用」当成「切换没有发生」——迟到的切换可能随后生效。
+ */
+test('P1-B：切换请求发出后失败、复查仍显示旧索引时，保留新索引并说明结果不确定', async () => {
+  const adapter = new RecordingProductIndexAdapter()
+  await run(adapter)
+
+  adapter.aliasUpdateFailure = ({ add, remove }) =>
+    add.includes('products_v2') && remove.includes('products_v1')
+      ? new Error('模拟的别名切换超时')
+      : undefined
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /模拟的别名切换超时/)
+    assert.match(error.message, /切换结果不确定/)
+    assert.match(error.message, /已保留/)
+    return true
+  })
+
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v1'], '复查时别名仍指向旧索引')
+  assert.equal(adapter.indices.has('products_v2'), true, '切换结果不确定时新索引必须保留')
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'deleteIndex' && step.index === 'products_v2'),
+    false,
+    '切换请求已发出但结果不明时不得调用 deleteIndex',
+  )
+})
+
+test('P1-B：切换从未发出就失败时，可安全清理自己创建的新索引', async () => {
+  const adapter = new RecordingProductIndexAdapter()
+  adapter.bulkErrorIds.add('keychron-k8')
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /未切换别名/)
+    assert.match(error.message, /新索引已清理/)
+    return true
+  })
+
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'updateAlias'),
+    false,
+    'bulk 失败发生在切换之前，不应发出切换请求',
+  )
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'deleteIndex' && step.index === 'products_v1'),
+    true,
+    '从未发出切换请求时可以安全删除自己创建的新索引',
+  )
+  assert.equal(adapter.indices.has('products_v1'), false)
+})
+
+/**
  * 模拟「服务端已完成别名切换，但调用方收到异常」（P1-A）：
  * 先真正应用 add/remove，再抛错，复现「已生效但响应丢失」。
  */
@@ -286,4 +342,80 @@ test('P1-A：别名状态查询失败时视为未知，保留新索引并说明�
     '状态未知时不得调用 deleteIndex',
   )
   assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v1'])
+})
+
+/**
+ * P2（本轮复审）：两次重建可能选中同一版本号（max+1 非原子）。
+ * 先创建成功的一方，其索引不得被创建失败的一方在异常清理里删掉。
+ */
+test('P2：版本冲突时重新取号并重试，且不清理不属于自己的索引', async () => {
+  const adapter = new RecordingProductIndexAdapter()
+  adapter.firstCreateConflict = true
+
+  const result = await run(adapter)
+
+  assert.equal(result.index, 'products_v2', '冲突后应按 max+1 重新取号')
+  assert.deepEqual(
+    adapter.steps.flatMap((step) => (step.name === 'createIndex' ? [step.index] : [])),
+    ['products_v1', 'products_v2'],
+    '首次冲突后应重新取号再建一次',
+  )
+  assert.equal(adapter.indices.has('products_v1'), true, '别人创建的 products_v1 不得删除')
+  assert.equal(adapter.indices.has('products_v2'), true)
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'deleteIndex'),
+    false,
+    '版本冲突不得触发任何索引清理',
+  )
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v2'])
+})
+
+test('P2：建索引失败即中止，不继续 bulk，也不清理未创建的索引', async () => {
+  const adapter = new RecordingProductIndexAdapter()
+  adapter.createIndexFailure = (index) =>
+    index === 'products_v1' ? new Error('模拟的建索引失败') : undefined
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /模拟的建索引失败/)
+    assert.match(error.message, /不是由本次重建创建/)
+    return true
+  })
+
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'bulk'),
+    false,
+    '建索引失败后不得继续 bulk（否则 ES 会自动建索引）',
+  )
+  assert.equal(adapter.steps.some((step) => step.name === 'updateAlias'), false)
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'deleteIndex'),
+    false,
+    '未创建成功时不得调用 deleteIndex',
+  )
+})
+
+test('P2：目标索引 mapping 与契约不符时失败，不切换别名', async () => {
+  const adapter = new RecordingProductIndexAdapter()
+  adapter.mappingOverrides = { name: { type: 'text', analyzer: 'smartcn' } }
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /映射与契约不一致/)
+    assert.match(error.message, /name/)
+    return true
+  })
+
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'updateAlias'),
+    false,
+    '映射校验失败时不得切换别名',
+  )
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], [])
+  assert.deepEqual(
+    adapter.steps.flatMap((step) => (step.name === 'deleteIndex' ? [step.index] : [])),
+    ['products_v1'],
+    '只清理本次重建自己创建的索引',
+  )
+  assert.equal(adapter.indices.has('products_v1'), false)
 })
