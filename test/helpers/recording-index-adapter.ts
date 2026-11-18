@@ -4,7 +4,7 @@ import type {
   ProductIndexAdapter,
 } from '../../src/search/index-rebuild.ts'
 import type { ProductSearchDocument } from '../../src/search/product-snapshot.ts'
-import { productIndexVersion } from '../../src/search/index-mapping.ts'
+import { PRODUCT_INDEX_PREFIX, productIndexVersion } from '../../src/search/index-mapping.ts'
 
 /** 记录型假适配器：记录调用序列，并在内存里维护索引、文档与别名。 */
 export type RecordedStep =
@@ -19,10 +19,20 @@ export type RecordedStep =
   | { name: 'searchTotal', index: string }
   | { name: 'deleteIndex', index: string }
 
+export interface RecordingProductIndexAdapterOptions {
+  /** 物理索引前缀；默认 products_v，与生产一致。 */
+  indexPrefix?: string
+}
+
 export class RecordingProductIndexAdapter implements ProductIndexAdapter {
   readonly steps: RecordedStep[] = []
   readonly indices = new Map<string, Map<string, ProductSearchDocument>>()
   readonly aliases = new Map<string, Set<string>>()
+  private readonly indexPrefix: string
+
+  constructor (options: RecordingProductIndexAdapterOptions = {}) {
+    this.indexPrefix = options.indexPrefix ?? PRODUCT_INDEX_PREFIX
+  }
 
   /** 模拟 bulk 逐项失败；errors 与 item.status 同步变为失败。 */
   bulkErrorIds = new Set<string>()
@@ -30,11 +40,13 @@ export class RecordingProductIndexAdapter implements ProductIndexAdapter {
   corruptDocument?: (document: ProductSearchDocument) => ProductSearchDocument
   /** 非负值时覆盖冒烟查询总数，用于模拟切别名后失败。 */
   smokeTotal = -1
+  /** 让指定的一次 updateAlias 直接失败（例如模拟回滚失败）。 */
+  aliasUpdateFailure?: (attempt: { alias: string, add: string[], remove: string[] }) => Error | undefined
 
   async listProductIndices (): Promise<string[]> {
     this.steps.push({ name: 'listProductIndices' })
     return [...this.indices.keys()]
-      .filter((name) => productIndexVersion(name) !== null)
+      .filter((name) => productIndexVersion(name, this.indexPrefix) !== null)
       .sort()
   }
 
@@ -71,7 +83,7 @@ export class RecordingProductIndexAdapter implements ProductIndexAdapter {
       store.set(operation.id, document)
       return { id: operation.id, status: 201 }
     })
-    return { status: 200, errors, items }
+    return { errors, items }
   }
 
   async refresh (index: string): Promise<void> {
@@ -94,6 +106,8 @@ export class RecordingProductIndexAdapter implements ProductIndexAdapter {
 
   async updateAlias (alias: string, add: string[], remove: string[]): Promise<void> {
     this.steps.push({ name: 'updateAlias', alias, add: [...add], remove: [...remove] })
+    const failure = this.aliasUpdateFailure?.({ alias, add: [...add], remove: [...remove] })
+    if (failure !== undefined) throw failure
     const targets = this.aliases.get(alias) ?? new Set<string>()
     for (const index of remove) targets.delete(index)
     for (const index of add) targets.add(index)

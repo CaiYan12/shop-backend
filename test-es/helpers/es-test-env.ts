@@ -15,6 +15,17 @@ export const TEST_ALIAS = 'products_es_test_alias'
 export const LONG_AMOUNT_INDEX = 'products_es_test_amount'
 export const LONG_AMOUNT_ALIAS = 'products_es_test_amount_alias'
 
+/** 高亮契约（#23）单独用一个索引。 */
+export const HIGHLIGHT_INDEX = 'products_es_test_highlight'
+export const HIGHLIGHT_ALIAS = 'products_es_test_highlight_alias'
+
+/**
+ * 重建端到端（#25）：可配置物理索引前缀，产物形如 products_es_test_rebuild_v1。
+ * 该前缀不以 products_v 开头，默认套件与演示重建的扫描都不会命中。
+ */
+export const TEST_REBUILD_PREFIX = 'products_es_test_rebuild_v'
+export const TEST_REBUILD_ALIAS = 'products_es_test_rebuild_alias'
+
 /** 演示别名（ADR 0003）；只用于「测试没有动它」的核对，绝不读写。 */
 export const DEMO_ALIAS = PRODUCTS_ALIAS
 

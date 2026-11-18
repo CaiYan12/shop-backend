@@ -1,187 +1,153 @@
-import test from 'node:test'
+import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
-import type { Client } from '@elastic/elasticsearch'
-import type {
-  SearchHit,
-  SearchRequest,
-  SearchResponse,
-} from '@elastic/elasticsearch/lib/api/types'
-import { ElasticsearchProductSearchAdapter } from '../src/search/elasticsearch-adapter.ts'
+import type { RowDataPacket } from 'mysql2'
+import type { Pool } from 'mysql2/promise'
+import type { AppInstance } from '../src/app.ts'
+import type { ListItem } from './helpers/api-types.ts'
+import { FakeProductSearchAdapter } from './helpers/fake-search-adapter.ts'
+import { closeSeededApp, createSeededApp } from './helpers/seeded-app.ts'
 
 /**
- * 高亮的适配器契约（#23）。
+ * 命中高亮（#23）的 HTTP 契约。
  *
- * 断言落在这个适配器对外的两边：交给 ES 客户端的 SearchRequest 里的 highlight 配置，
- * 以及把 ES 响应里的 highlight 映射成端口结果。不测查询 DSL 的字符串拼接，
- * 也不依赖 Elasticsearch 在线——客户端由本文件注入假实现。
+ * 只断言调用方可见的结果：列表与联想的响应里，高亮按 slug 合并回条目、
+ * 有片段才出现字段、无片段时整个字段缺省。适配器内部的请求参数与假 ES
+ * 响应映射属于实现细节，不在这里断言；真实 ES 的高亮行为见
+ * test-es/search-highlight.test.ts。
  */
 
-interface FakeClient {
-  client: Client
-  requests: SearchRequest[]
+interface ListItemHighlight {
+  name?: string[]
+  brand?: string[]
+  model?: string[]
 }
 
-function fakeClient (respond: (request: SearchRequest) => unknown): FakeClient {
-  const requests: SearchRequest[] = []
-  const search = async (request: SearchRequest): Promise<unknown> => {
-    requests.push(request)
-    return respond(request)
-  }
-  return { client: { search } as unknown as Client, requests }
+interface HighlightedListItem extends ListItem {
+  highlight?: ListItemHighlight
 }
 
-function listResponse (
-  hits: Array<{ id: string, productId: number, slug: string, highlight?: Record<string, string[]> }>,
-): SearchResponse {
-  return {
-    took: 1,
-    timed_out: false,
-    _shards: { total: 1, successful: 1, skipped: 0, failed: 0 },
-    hits: {
-      total: { value: hits.length, relation: 'eq' },
-      max_score: 1,
-      hits: hits.map((hit) => ({
-        _index: 'products_v1',
-        _id: hit.id,
-        _score: 1,
-        _source: { productId: hit.productId, slug: hit.slug },
-        ...(hit.highlight === undefined ? {} : { highlight: hit.highlight }),
-      } as SearchHit)),
-    },
-  } as unknown as SearchResponse
+interface ListBody {
+  page: number
+  pageSize: number
+  total: number
+  totalPages: number
+  items: HighlightedListItem[]
 }
 
-const HIGHLIGHT_FIELDS = ['brand', 'model', 'name']
-
-/** ES 的 `fields` 允许数组写法；本适配器只写对象写法，测试按对象读取。 */
-type HighlightFields = Record<string, { number_of_fragments?: number, matched_fields?: string[] }>
-
-function highlightFields (highlight: NonNullable<SearchRequest['highlight']>): HighlightFields {
-  return (highlight.fields ?? {}) as HighlightFields
+interface SuggestionItem {
+  slug: string
+  name: string
+  brand: string
+  highlight?: { name?: string[], brand?: string[] }
 }
 
-test('列表搜索请求显式设置 html 编码与固定 em 标签，并覆盖 name / brand / model 三个字段', async () => {
-  const { client, requests } = fakeClient(() => listResponse([]))
-  const adapter = new ElasticsearchProductSearchAdapter(client)
+interface SuggestionsBody {
+  items: SuggestionItem[]
+}
 
-  await adapter.search({ keyword: '降噪', page: 1, pageSize: 8 })
+let pool: Pool
+let app: AppInstance
+const search = new FakeProductSearchAdapter()
 
-  const [request] = requests
-  assert.ok(request !== undefined, '列表搜索应发出一次 ES 请求')
-
-  const highlight = request.highlight
-  assert.ok(highlight !== undefined, '列表搜索必须声明 highlight')
-  // encoder: 'html' 是「先转义原文再插入标签」的开关；缺了它，原文里的 HTML 会被当成标签带进响应。
-  assert.equal(highlight.encoder, 'html', '必须显式使用 html 编码器')
-  assert.deepEqual(highlight.pre_tags, ['<em>'], '命中片段只用固定 <em> 开标签')
-  assert.deepEqual(highlight.post_tags, ['</em>'], '命中片段只用固定 </em> 闭标签')
-
-  const fields = highlightFields(highlight)
-  assert.deepEqual(Object.keys(fields).sort(), HIGHLIGHT_FIELDS, '列表高亮覆盖 name / brand / model')
-  for (const field of HIGHLIGHT_FIELDS) {
-    assert.equal(
-      fields[field]?.number_of_fragments,
-      0,
-      field + ' 应返回整字段片段，前端据此替换原字段而不是拼接摘要',
-    )
-  }
-
-  // 合并键是 slug：命中文档的 _source 必须带回 slug。
-  assert.deepEqual([...(request._source as string[])].sort(), ['productId', 'slug'])
+before(async () => {
+  ({ pool, app } = await createSeededApp({ search }))
 })
 
-test('列表响应的高亮按 slug 映射成端口结果：空数组字段被丢弃，无片段时不产生条目', async () => {
-  const { client } = fakeClient(() => listResponse([
-    {
-      id: 'sony-wh-1000xm3',
-      productId: 3,
-      slug: 'sony-wh-1000xm3',
-      highlight: {
-        name: ['Sony WH-1000XM3 无线<em>降</em><em>噪</em>头戴耳机'],
-        brand: ['<em>Sony</em>'],
-        model: [],
-      },
-    },
-    { id: 'dell-e2210f', productId: 4, slug: 'dell-e2210f', highlight: { model: ['<em>E2210f</em>'] } },
-    { id: 'apple-earpods', productId: 5, slug: 'apple-earpods' },
-  ]))
-  const adapter = new ElasticsearchProductSearchAdapter(client)
+after(async () => {
+  await closeSeededApp({ pool, app })
+})
 
-  const result = await adapter.search({ keyword: '降噪', page: 1, pageSize: 8 })
+function toQuery (params: Record<string, string | number>): string {
+  const searchParams = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) searchParams.set(key, String(value))
+  return searchParams.size === 0 ? '' : `?${searchParams.toString()}`
+}
 
-  assert.deepEqual(result.productIds, [3, 4, 5], '命中顺序与总数不受高亮影响')
-  assert.equal(result.total, 3)
-  assert.deepEqual([...result.highlights.entries()], [
+async function list (params: Record<string, string | number> = {}): Promise<{ status: number, body: ListBody }> {
+  const response = await app.inject({ method: 'GET', url: `/api/products${toQuery(params)}` })
+  return { status: response.statusCode, body: response.json() as ListBody }
+}
+
+async function suggest (params: Record<string, string | number> = {}): Promise<{ status: number, body: SuggestionsBody }> {
+  const response = await app.inject({ method: 'GET', url: `/api/products/suggestions${toQuery(params)}` })
+  return { status: response.statusCode, body: response.json() as SuggestionsBody }
+}
+
+/** 由 slug 取商品 id：只做夹具准备，断言仍落在 HTTP 响应上。 */
+async function productIds (slugs: string[]): Promise<number[]> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    'SELECT id, slug FROM products WHERE slug IN (?)',
+    [slugs],
+  )
+  const bySlug = new Map(rows.map((row) => [String(row.slug), Number(row.id)]))
+  return slugs.map((slug) => {
+    const id = bySlug.get(slug)
+    assert.ok(id !== undefined, `种子数据里应有商品 ${slug}`)
+    return id
+  })
+}
+
+test('关键词搜索的 HTTP 响应：高亮按 slug 合并回条目，无片段时字段缺省', async () => {
+  search.reset()
+  const slugs = ['sony-wh-1000xm3', 'apple-earpods', 'dell-e2210f']
+  search.hits = await productIds(slugs)
+  search.highlights = new Map([
     ['sony-wh-1000xm3', {
       name: ['Sony WH-1000XM3 无线<em>降</em><em>噪</em>头戴耳机'],
       brand: ['<em>Sony</em>'],
     }],
-    ['dell-e2210f', { model: ['<em>E2210f</em>'] }],
-  ], '空数组字段不出现；没有片段的命中不进入映射')
+    ['dell-e2210f', { model: ['Dell <em>E2210f</em> 22 英寸液晶显示器'] }],
+  ])
+
+  const { status, body } = await list({ keyword: '降噪' })
+  assert.equal(status, 200)
+  assert.deepEqual(body.items.map((item) => item.slug), slugs, '高亮不得改变命中顺序')
+
+  assert.deepEqual(body.items[0]?.highlight, {
+    name: ['Sony WH-1000XM3 无线<em>降</em><em>噪</em>头戴耳机'],
+    brand: ['<em>Sony</em>'],
+  }, '命中片段按字段原样出现在 HTTP 响应里')
+  assert.equal('highlight' in (body.items[1] ?? {}), false, '无命中片段的条目不出现 highlight')
+  assert.deepEqual(
+    Object.keys(body.items[2]?.highlight ?? {}),
+    ['model'],
+    '未命中的字段不出现，不是空数组',
+  )
+
+  search.reset()
 })
 
-test('联想请求的 highlight 只覆盖 name / brand，并用 matched_fields 指向 ._index_prefix 才能标出前缀', async () => {
-  const { client, requests } = fakeClient(() => listResponse([]) as unknown as SearchResponse)
-  const adapter = new ElasticsearchProductSearchAdapter(client)
-
-  await adapter.suggest({ prefix: 'AirP', limit: 5 })
-
-  const [request] = requests
-  assert.ok(request !== undefined, '联想应发出一次 ES 请求')
-
-  const highlight = request.highlight
-  assert.ok(highlight !== undefined, '联想必须声明 highlight')
-  assert.equal(highlight.encoder, 'html')
-  assert.deepEqual(highlight.pre_tags, ['<em>'])
-  assert.deepEqual(highlight.post_tags, ['</em>'])
-
-  const fields = highlightFields(highlight)
-  assert.deepEqual(Object.keys(fields).sort(), ['brand', 'name'], '联想高亮只覆盖 name / brand')
-  for (const field of ['name', 'brand']) {
-    assert.deepEqual(
-      fields[field]?.matched_fields,
-      [field, field + '._index_prefix'],
-      field + ' 的 matched_fields 必须包含自身的 ._index_prefix 子字段',
-    )
-  }
-})
-
-test('联想响应的 highlight 映射到条目：有片段才带字段，无片段不补齐', async () => {
-  const { client } = fakeClient(() => ({
-    hits: {
-      total: { value: 2, relation: 'eq' },
-      hits: [
-        {
-          _index: 'products_v1',
-          _id: 'apple-airpods-max',
-          _score: 1,
-          _source: { slug: 'apple-airpods-max', name: 'Apple AirPods Max 头戴式降噪耳机', brand: 'Apple' },
-          highlight: {
-            name: ['Apple <em>AirPods</em> Max 头戴式降噪耳机'],
-            brand: ['<em>Apple</em>'],
-          },
-        },
-        {
-          _index: 'products_v1',
-          _id: 'sony-wh-1000xm3',
-          _score: 1,
-          _source: { slug: 'sony-wh-1000xm3', name: 'Sony WH-1000XM3 无线降噪头戴耳机', brand: 'Sony' },
-        },
-      ],
+test('商品联想的 HTTP 响应：有片段才带 highlight，无片段不补空对象', async () => {
+  search.reset()
+  search.items = [
+    {
+      slug: 'sony-wh-1000xm3',
+      name: 'Sony WH-1000XM3 无线降噪头戴耳机',
+      brand: 'Sony',
+      highlight: {
+        name: ['Sony WH-1000XM3 无线<em>降噪</em>头戴耳机'],
+        brand: ['<em>Sony</em>'],
+      },
     },
-  } as unknown as SearchResponse))
-  const adapter = new ElasticsearchProductSearchAdapter(client)
-
-  const result = await adapter.suggest({ prefix: 'AirP', limit: 5 })
-
-  assert.deepEqual(result.items[0], {
-    slug: 'apple-airpods-max',
-    name: 'Apple AirPods Max 头戴式降噪耳机',
-    brand: 'Apple',
-    highlight: {
-      name: ['Apple <em>AirPods</em> Max 头戴式降噪耳机'],
-      brand: ['<em>Apple</em>'],
+    {
+      slug: 'apple-airpods-max',
+      name: 'Apple AirPods Max 头戴式降噪耳机',
+      brand: 'Apple',
     },
+  ]
+
+  const { status, body } = await suggest({ q: '降噪' })
+  assert.equal(status, 200)
+  assert.deepEqual(body.items[0]?.highlight, {
+    name: ['Sony WH-1000XM3 无线<em>降噪</em>头戴耳机'],
+    brand: ['<em>Sony</em>'],
   })
-  assert.equal('highlight' in (result.items[1] ?? {}), false, '无片段时不应出现 highlight 字段')
+  assert.equal('highlight' in (body.items[1] ?? {}), false, '无命中片段时不补空 highlight')
+  assert.deepEqual(
+    Object.keys(body.items[0] ?? {}).sort(),
+    ['brand', 'highlight', 'name', 'slug'],
+    '有片段时条目只多出一个 highlight 字段',
+  )
+
+  search.reset()
 })
