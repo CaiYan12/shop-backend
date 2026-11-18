@@ -253,18 +253,16 @@ export async function rebuildProductIndex (
       }
     }
 
-    // 回滚失败时别名可能仍指向新索引：先核对别名，确认已不含新索引才删除。
-    // 否则删掉新索引会把别名指向不存在的索引，违背「重建失败时旧索引继续服务」。
+    // 别名切换请求可能已在服务端生效但调用方收到异常，因此不能依赖本地标志：
+    // 一律重新查询，只有「查询成功且明确不含新索引」才允许删除新索引。
     let aliasTargets: string[] | undefined
-    if (aliasSwitched) {
-      try {
-        aliasTargets = await adapter.aliasIndices(alias)
-      } catch (checkError) {
-        rollbackNote += `；核对别名状态失败（${describeError(checkError)}）`
-      }
+    try {
+      aliasTargets = await adapter.aliasIndices(alias)
+    } catch (checkError) {
+      rollbackNote += `；核对别名状态失败（${describeError(checkError)}）`
     }
-    const newIndexStillReferenced = aliasSwitched &&
-      (aliasTargets === undefined || aliasTargets.includes(indexName))
+    const aliasPointsToNewIndex = aliasTargets?.includes(indexName) ?? false
+    const newIndexStillReferenced = aliasTargets === undefined || aliasPointsToNewIndex
 
     let cleanupNote = ''
     if (newIndexStillReferenced) {
@@ -280,7 +278,12 @@ export async function rebuildProductIndex (
       }
     }
 
-    const prefix = aliasSwitched ? '索引重建失败' : '索引重建失败，未切换别名'
+    // 是否已切换按查询到的真实状态表述，不用本地 aliasSwitched。
+    const prefix = aliasTargets === undefined
+      ? '索引重建失败，别名状态未知'
+      : aliasPointsToNewIndex
+        ? '索引重建失败'
+        : '索引重建失败，未切换别名'
     throw new IndexRebuildError(
       `${prefix}（${failure}）${rollbackNote}${cleanupNote}。`,
       { cause: error },

@@ -91,7 +91,7 @@ cd /d/Dev/elasticsearch-9.5.6 && ./bin/elasticsearch-plugin.bat install --batch 
 |---|---|
 | `start.bat` | 先 `node scripts\es-dev.mjs`，再 `node scripts\dev.mjs`；两行**不用 `&&` 串联**，ES 失败也照常启动后端 |
 | `stop.bat` | 先 `node scripts\stop.mjs`，再 `node scripts\es-stop.mjs`；后端退出码非零时最后以该码退出 |
-| `scripts/es-dev.mjs` | 探测 → 复用或拉起 → 等待就绪 → 写运行记录 |
+| `scripts/es-dev.mjs` | 探测 → 复用或拉起 → 等待就绪 → 校验归属 → 写运行记录 |
 | `scripts/es-stop.mjs` | 校验归属 → 终止 → 清理记录 |
 
 ### 3.2 探测与复用
@@ -104,7 +104,7 @@ cd /d/Dev/elasticsearch-9.5.6 && ./bin/elasticsearch-plugin.bat install --batch 
 ### 3.3 等待与超时
 
 拉起后每秒轮询一次 `/_cluster/health?wait_for_status=yellow&timeout=2s`，默认超时 180 s（`ES_READY_TIMEOUT_MS`）。
-超时输出日志目录里最新 `.log` 的末尾 20 行（只读末尾 64 KiB），并终止本次创建的进程，避免留下半启动实例。
+超时输出日志目录里最新 `.log` 的末尾 20 行（只读末尾 64 KiB）。终止前先判定端口监听者是否属于本次启动：只有监听者 PID 等于 `Start-Process` 返回的启动器 PID，或沿 `ParentProcessId` 能上溯到启动器，且可执行路径/命令行能佐证来自 `ES_HOME` 时才终止，避免留下半启动实例；判定不成立时**不终止任何进程**，输出「端口 9201 被外部进程 N 占用，本次不终止」并以非零码退出。
 
 ### 3.4 运行记录 `.run/es.json`
 
@@ -123,8 +123,10 @@ cd /d/Dev/elasticsearch-9.5.6 && ./bin/elasticsearch-plugin.bat install --batch 
 }
 ```
 
-`pid` 取**监听 9201 的进程**（即服务 JVM），不是启动器 JVM。`es-stop.mjs` 终止前校验 `startTime` 与 `execPath`，
-任一不符即拒绝终止并保留记录——进程号会被系统复用，仅凭存活无法证明归属。
+`pid` 取**监听 9201 的进程**（即服务 JVM），不是启动器 JVM。写记录前先判定归属：监听者必须是本次
+`Start-Process` 返回的启动器 PID 本身，或沿 `ParentProcessId` 能上溯到启动器的后代，且可执行路径/命令行
+能佐证来自 `ES_HOME`。判定不成立（例如预检后端口被外部进程抢占）时不写记录、不宣称启动成功，并以非零码退出。
+`es-stop.mjs` 终止前再校验 `startTime` 与 `execPath`，任一不符即拒绝终止并保留记录——进程号会被系统复用，仅凭存活无法证明归属。
 
 > **ES 9.5.6 是两段 JVM**：`elasticsearch.bat` 先起启动器 JVM，再由它拉起服务 JVM。
 > 因此机器上会同时存在两个 `java.exe`。实测服务 JVM 被终止后启动器自行退出（两次停止后 `java.exe` 列表为空）。
@@ -162,7 +164,7 @@ $ curl -s 'http://127.0.0.1:9201/_cluster/health'
 
 ## 5. V2 · 启动耗时
 
-测量方式：`scripts/es-dev.mjs` 从创建进程（`spawn`）到 `_cluster/health` 首次返回 `yellow`/`green` 的墙钟差，
+测量方式：`scripts/es-dev.mjs` 从 `Start-Process` 拉起启动器到 `_cluster/health` 首次返回 `yellow`/`green` 的墙钟差，
 结果写入 `.run/es.json` 的 `startupMs`。复现：`cat .run/es.json` 或看 `node scripts/es-dev.mjs` 的末行输出。
 
 | 序 | 场景 | 耗时 | `startupMs` | 时间戳（UTC） |

@@ -278,3 +278,64 @@ test('探测进行中只允许一个请求真正执行，其余并发请求照�
   assert.equal(intruderResult.body.error.code, 'SEARCH_NOT_AVAILABLE')
   assert.equal(search.searchCalls, 2, '并发请求自始至终没有触达适配器')
 })
+
+/**
+ * 迟到成功响应（P2）：第一次搜索在开窗前发出并挂起，第二次搜索触发可用性故障开窗；
+ * 释放第一次搜索后它返回成功。这个成功属于旧窗口代次，不能关闭新开的窗口。
+ */
+class LateSuccessSearchAdapter implements ProductSearchAdapter {
+  searchCalls = 0
+  suggestionCalls = 0
+  private enteredResolve: (() => void) | undefined = undefined
+  private releaseResolve: (() => void) | undefined = undefined
+  readonly entered = new Promise<void>((resolve) => { this.enteredResolve = resolve })
+  private readonly gate = new Promise<void>((resolve) => { this.releaseResolve = resolve })
+
+  release (): void {
+    this.releaseResolve?.()
+  }
+
+  async search (): Promise<ProductSearchResult> {
+    this.searchCalls += 1
+    if (this.searchCalls === 1) {
+      this.enteredResolve?.()
+      await this.gate
+      return { total: 0, productIds: [], highlights: new Map() }
+    }
+    throw new SearchUnavailableError('模拟的搜索服务连接失败。')
+  }
+
+  async suggest (): Promise<ProductSuggestionResult> {
+    this.suggestionCalls += 1
+    return { items: [] }
+  }
+}
+
+test('P2：开窗前发出的请求迟到成功，不得关闭此后建立的冷却窗口', async () => {
+  const clock = new TestClock(0)
+  const search = new LateSuccessSearchAdapter()
+  const app = await makeApp(search, clock)
+
+  // A 在开窗前发出，挂在适配器里。
+  const late = get(app, keywordUrl('耳机'))
+  await search.entered
+  assert.equal(search.searchCalls, 1, 'A 已触达适配器并挂起')
+
+  // B 触发可用性故障，打开 5 秒窗口。
+  const openWindow = await get(app, keywordUrl('耳机'))
+  assert.equal(openWindow.status, 503)
+  assert.equal(openWindow.body.error.code, 'SEARCH_NOT_AVAILABLE')
+  assert.equal(search.searchCalls, 2, 'B 触达适配器并开窗')
+
+  // 时钟只前进 1 ms，随后 A 才返回成功。
+  clock.advance(1)
+  search.release()
+  const lateResult = await late
+  assert.equal(lateResult.status, 200, 'A 本身仍按成功返回')
+
+  // 窗口必须仍在：联想直接 503，且没有触达适配器。
+  const suggestion = await get(app, suggestionUrl('耳'))
+  assert.equal(suggestion.status, 503, '迟到的成功不得清掉刚建立的冷却窗口')
+  assert.equal(suggestion.body.error.code, 'SEARCH_NOT_AVAILABLE')
+  assert.equal(search.suggestionCalls, 0, '窗口内的联想请求不得触达适配器')
+})
