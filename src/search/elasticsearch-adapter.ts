@@ -95,10 +95,15 @@ function describeAliasAction (action: AliasActionRequest): string {
   return '(未知动作)'
 }
 
-/** 真实 ES 的单项 action_result：`{ add|remove: { status, error? } }`。 */
 interface AliasActionResultPayload {
   status?: unknown
   error?: unknown
+}
+
+/** 真实 ES 9.x 的单项 action_result：动作名下是 index/alias，status/error 在对象外层。 */
+interface AliasActionResultRecord extends AliasActionResultPayload {
+  add?: AliasActionResultPayload & { index?: string, alias?: string }
+  remove?: AliasActionResultPayload & { index?: string, alias?: string }
 }
 
 function isSuccessStatus (status: number): boolean {
@@ -106,12 +111,12 @@ function isSuccessStatus (status: number): boolean {
 }
 
 /**
- * 解析单项 action_result（第四轮复审）。
+ * 解析单项 action_result（第四轮复审，第五轮复审修正）。
  *
- * 真实 ES 返回对象数组，例如 { add: { status: 200 } } /
- * { remove: { status: 404, error: {...} } }；旧实现只识别布尔 false，
- * 真实 404 因此被当成成功。这里同时兼容布尔形式（测试桩），
- * 失败原因统一带上动作类型、目标索引与状态码。
+ * 真实 ES 9.x 把 status / error 放在动作对象外层，例如
+ * { add: { index, alias }, status: 200 } / { remove: { index, alias }, status: 404 }；
+ * 旧桩数据放在动作名下（{ remove: { status: 404 } }），布尔形式也仍然兼容。
+ * 因此优先读外层 record.status / record.error，再回退到动作名下。
  */
 function describeFailedAliasAction (
   action: AliasActionRequest | undefined,
@@ -121,15 +126,19 @@ function describeFailedAliasAction (
   if (result === true) return undefined
   if (result === false) return `${actionText}（布尔 false，无状态码）`
   if (typeof result !== 'object' || result === null) return undefined
-  const record = result as Record<string, AliasActionResultPayload>
+  const record = result as AliasActionResultRecord
   const kind = action?.add !== undefined ? 'add' : action?.remove !== undefined ? 'remove' : undefined
   const payload = kind === undefined ? undefined : record[kind]
-  if (payload === undefined) return undefined
-  const status = typeof payload.status === 'number' ? payload.status : undefined
-  const failure = status === undefined || !isSuccessStatus(status) || payload.error !== undefined
+  const status = typeof record.status === 'number'
+    ? record.status
+    : typeof payload?.status === 'number'
+      ? payload.status
+      : undefined
+  const error = record.error !== undefined ? record.error : payload?.error
+  const failure = status === undefined || !isSuccessStatus(status) || error !== undefined
   if (!failure) return undefined
   const statusText = status === undefined ? '未知状态码' : `状态码 ${status}`
-  const errorText = payload.error === undefined ? '' : `，错误 ${JSON.stringify(payload.error)}`
+  const errorText = error === undefined ? '' : `，错误 ${JSON.stringify(error)}`
   return `${actionText}（${statusText}${errorText}）`
 }
 

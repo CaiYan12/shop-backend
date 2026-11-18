@@ -568,6 +568,10 @@ async function rebuildProductIndexLocked (
     if (switchAttempted && exclusivityFailure) {
       // 切换后目标不唯一或无法确认：不在未知状态上再改一次别名。
       rollbackNote = '；别名目标不唯一或无法确认，未回滚'
+    } else if (aliasSwitched && previousIndices.length === 0) {
+      // P1（第五轮复审）：首次发布没有旧索引可回滚。updateAlias(alias, [], [indexName])
+      // 只会把唯一目标也移除，别名零目标、关键词接口 503；这里直接保留新索引。
+      rollbackNote = '；首次发布没有旧索引，不回滚别名'
     } else if (aliasSwitched) {
       // 保留回滚动作：冒烟失败时把别名恢复旧索引；回滚只恢复别名，不删除新索引。
       try {
@@ -586,6 +590,24 @@ async function rebuildProductIndexLocked (
         aliasTargets = await adapter.aliasIndices(alias)
       } catch (checkError) {
         rollbackNote += `；核对别名状态失败（${describeError(checkError)}）`
+      }
+    }
+    // 别名胜不为空（第五轮复审）：回滚（或首次发布跳过回滚）后一律复查；
+    // 只要读到零目标，立即把旧索引（存在时）或新索引加回别名，避免关键词接口 503。
+    if (aliasTargets !== undefined && aliasTargets.length === 0) {
+      const restoreTargets = previousIndices.length > 0 ? previousIndices : [indexName]
+      try {
+        await adapter.updateAlias(alias, restoreTargets, [])
+        rollbackNote +=
+          `；别名一度为空，已恢复别名，避免零目标（恢复为 ${describeTargets(restoreTargets)}）`
+        try {
+          aliasTargets = await adapter.aliasIndices(alias)
+        } catch (recheckError) {
+          aliasTargets = undefined
+          rollbackNote += `；恢复后核对别名失败（${describeError(recheckError)}）`
+        }
+      } catch (restoreError) {
+        rollbackNote += `；别名为空，恢复失败（${describeError(restoreError)}）`
       }
     }
     const aliasChecked = aliasTargets !== undefined
@@ -631,7 +653,13 @@ async function rebuildProductIndexLocked (
             : rollbackSucceeded
               ? '索引重建失败，别名已回滚'
               : '索引重建失败，别名切换结果不确定'
-    const message = `${prefix}（${failure}）${rollbackNote}${cleanupNote}。`
+    // P1（第五轮复审）：错误消息必须如实说明别名当前指向，而不是只说「已回滚」。
+    const aliasStateNote = !switchAttempted
+      ? ''
+      : aliasTargets === undefined
+        ? `；别名 ${alias} 当前状态无法确认`
+        : `；别名 ${alias} 当前${aliasTargets.length === 0 ? '无目标' : `指向 ${describeTargets(aliasTargets)}`}`
+    const message = `${prefix}（${failure}）${rollbackNote}${cleanupNote}${aliasStateNote}。`
     // 唯一目标失败保持专门的错误类型，调用方无需解析文案即可识别。
     throw error instanceof AliasExclusivityError
       ? new AliasExclusivityError(error.alias, error.targets, message, { cause: error })

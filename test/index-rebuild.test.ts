@@ -678,15 +678,20 @@ class RecheckAfterConvergeFailureAdapter extends RecordingProductIndexAdapter {
   }
 }
 
-test('收敛后复查抛一般错误：切换已尝试，保留新索引且不调用 deleteIndex', async () => {
+/**
+ * 首次发布（previousIndices 为空）时，收敛后的复查若抛一般错误，旧实现会走回滚：
+ * updateAlias(alias, [], [products_v1]) 把唯一目标也移除，别名零目标、关键词接口 503。
+ * 修复后首次发布不回滚，别名继续指向新索引；错误消息要说明别名当前指向哪里。
+ */
+test('首次发布后复查异常：别名保持指向新索引，且从未发起移除新索引的别名请求', async () => {
   const adapter = new RecheckAfterConvergeFailureAdapter()
 
   await assert.rejects(run(adapter), (error: unknown) => {
     assert.ok(error instanceof IndexRebuildError)
     assert.match(error.message, /模拟的收敛后复查失败/)
-    assert.match(error.message, /已回滚/)
-    assert.match(error.message, /尝试过切换就不删除/)
     assert.match(error.message, /products_v1/)
+    assert.match(error.message, /别名 products_test 当前指向 products_v1/)
+    assert.doesNotMatch(error.message, /别名已回滚/)
     return true
   })
 
@@ -696,7 +701,83 @@ test('收敛后复查抛一般错误：切换已尝试，保留新索引且不�
     false,
     '尝试过切换后任何异常路径都不得调用 deleteIndex',
   )
-  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], [], '回滚移除新索引后别名无目标')
+  assert.deepEqual(
+    [...(adapter.aliases.get(ALIAS) ?? [])],
+    ['products_v1'],
+    '首次发布没有旧索引，失败后别名仍必须指向新索引',
+  )
+  assert.deepEqual(
+    adapter.steps.filter(
+      (step) => step.name === 'updateAlias' && step.remove.includes('products_v1'),
+    ),
+    [],
+    '首次发布失败不得发起移除新索引的别名请求',
+  )
+})
+
+/**
+ * 模拟回滚请求「只生效了 remove 新索引，add 旧索引未落地」：别名被撤空。
+ * 这正是 P1 的停服形态；修复后必须在 catch 里复查并立即恢复。
+ */
+class RollbackEmptiesAliasAdapter extends RecordingProductIndexAdapter {
+  override async updateAlias (alias: string, add: string[], remove: string[]): Promise<void> {
+    if (add.includes('products_v1') && remove.includes('products_v2')) {
+      await super.updateAlias(alias, [], remove)
+      throw new Error('模拟的回滚响应丢失')
+    }
+    await super.updateAlias(alias, add, remove)
+  }
+}
+
+test('回滚把别名撤空时立即恢复旧索引，并在消息里说明已恢复', async () => {
+  const adapter = new RollbackEmptiesAliasAdapter()
+  await run(adapter)
+  adapter.smokeTotal = 0
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /模拟的回滚响应丢失/)
+    assert.match(error.message, /已恢复别名，避免零目标/)
+    assert.match(error.message, /别名 products_test 当前指向 products_v1/)
+    return true
+  })
+
+  assert.deepEqual(
+    [...(adapter.aliases.get(ALIAS) ?? [])],
+    ['products_v1'],
+    '零目标必须立即恢复为旧索引',
+  )
+  assert.equal(adapter.indices.has('products_v2'), true, '新索引仍按规则保留')
+})
+
+/**
+ * 首次发布没有旧索引：别名被外部撤空后只能加回新索引。
+ */
+class ExternalEmptyAfterSwitchAdapter extends RecordingProductIndexAdapter {
+  override async searchTotal (index: string): Promise<number> {
+    await this.updateAlias(index, [], ['products_v1'])
+    return 0
+  }
+}
+
+test('首次发布中途别名被外部撤空时立即恢复新索引，避免零目标', async () => {
+  const adapter = new ExternalEmptyAfterSwitchAdapter()
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /冒烟查询没有命中/)
+    assert.match(error.message, /已恢复别名，避免零目标/)
+    assert.match(error.message, /别名 products_test 当前指向 products_v1/)
+    assert.doesNotMatch(error.message, /别名已回滚/)
+    return true
+  })
+
+  assert.deepEqual(
+    [...(adapter.aliases.get(ALIAS) ?? [])],
+    ['products_v1'],
+    '没有旧索引时必须把新索引加回别名',
+  )
+  assert.equal(adapter.indices.has('products_v1'), true)
 })
 
 /** 忽略收敛请求的别名桩：用来验证轮数耗尽后的失败路径。 */
