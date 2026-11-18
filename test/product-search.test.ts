@@ -6,13 +6,16 @@ import type { AppInstance } from '../src/app.ts'
 import type { ErrorBody, ListItem } from './helpers/api-types.ts'
 import { FakeProductSearchAdapter } from './helpers/fake-search-adapter.ts'
 import { closeSeededApp, createSeededApp } from './helpers/seeded-app.ts'
+import { TestClock } from './helpers/test-clock.ts'
 
 let pool: Pool
 let app: AppInstance
 const search = new FakeProductSearchAdapter()
+// 冷却窗口用假时钟（#24）：本文件不验证冷却，见 test/search-cooldown.test.ts。
+const clock = new TestClock()
 
 before(async () => {
-  ({ pool, app } = await createSeededApp({ search }))
+  ({ pool, app } = await createSeededApp({ search, searchCooldown: { now: clock.now } }))
 })
 
 after(async () => {
@@ -185,6 +188,8 @@ test('搜索端口不可用返回 503 与 SEARCH_NOT_AVAILABLE，无关键词的
   assert.equal(search.queries.length, 1, '普通浏览不应调用搜索端口')
 
   search.reset()
+  // 上一个失败请求开窗 5 s；推进时钟让窗口立即到期，避免影响后一个用例（#24）。
+  clock.advance(5_000)
 })
 
 test('搜索端口的非可用性异常走 500，不被误映射为 503', async () => {

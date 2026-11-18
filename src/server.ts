@@ -10,10 +10,15 @@ import {
 import type { ProductSearchAdapter } from './search/product-search.ts'
 
 /**
- * 在线搜索的请求超时（V19 待实测）：显式 3 s、不自动重试。
+ * 在线搜索的请求超时（#24、V19）：显式 3 s。
  * 与重建客户端分开取超时：重建一次 bulk 允许 30 s，在线查询不能等那么久。
+ * `@elastic/elasticsearch@9.5.1` 的 `ClientOptions` 只有 `requestTimeout` / `maxRetries` /
+ * `pingTimeout`，没有独立的连接超时参数（核对记录见 docs/es-notes.md §13）。
  */
 const SEARCH_REQUEST_TIMEOUT_MS = 3_000
+
+/** 在线搜索不自动重试（#24、V19）：一次失败立刻降级，后续请求由 5 s 冷却窗口兜住。 */
+const SEARCH_MAX_RETRIES = 0
 
 export interface StartServerOptions {
   /** 已解析的配置；省略时读取 .env 与进程环境变量。 */
@@ -41,7 +46,11 @@ export async function startServer (options: StartServerOptions = {}): Promise<St
   const config = options.config ?? loadConfig()
   const pool = (options.createPool ?? createPool)(config)
   const search = options.search ?? new ElasticsearchProductSearchAdapter(
-    createElasticsearchClient({ node: config.esUrl, requestTimeout: SEARCH_REQUEST_TIMEOUT_MS }),
+    createElasticsearchClient({
+      node: config.esUrl,
+      requestTimeout: SEARCH_REQUEST_TIMEOUT_MS,
+      maxRetries: SEARCH_MAX_RETRIES,
+    }),
   )
   const app = await createApp({
     db: createDb(pool),

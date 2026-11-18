@@ -13,6 +13,7 @@ import { registerProductRoutes } from './routes/products.ts'
 import { registerPurchaseCheckRoutes } from './routes/purchase-check.ts'
 import { registerProductSchemas } from './schemas/product.ts'
 import type { ProductSearchAdapter } from './search/product-search.ts'
+import { withSearchCooldown, type SearchCooldownOptions } from './search/search-cooldown.ts'
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -35,6 +36,11 @@ export interface CreateAppOptions {
    * 生产入口注入 Elasticsearch 适配器，测试注入假实现，因此默认套件不依赖 ES。
    */
   search: ProductSearchAdapter
+  /**
+   * 搜索降级冷却（#24）：窗口长度与时钟；默认 5 s + `Date.now`。
+   * 冷却状态随每次 `createApp` 新建，不跨应用实例共享；测试注入假时钟。
+   */
+  searchCooldown?: SearchCooldownOptions
   /** 是否输出请求日志；测试默认关闭。 */
   logger?: boolean
 }
@@ -124,12 +130,14 @@ export async function createApp ({
   db,
   config,
   search,
+  searchCooldown,
   logger = false,
 }: CreateAppOptions): Promise<AppInstance> {
   const app = buildFastify({ logger })
   app.decorate('db', db)
   app.decorate('config', config)
-  app.decorate('productSearch', search)
+  // 降级冷却在应用工厂内装配（#24）：路由注入的端口与生产路径都经过同一个冷却门。
+  app.decorate('productSearch', withSearchCooldown(search, searchCooldown))
 
   // 文档插件必须先于业务路由注册，才能收集到路由 schema（D64）。
   await app.register(swagger, {

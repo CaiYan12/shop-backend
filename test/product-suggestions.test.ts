@@ -5,6 +5,7 @@ import { createApp, type AppInstance } from '../src/app.ts'
 import { createDb, createPool } from '../src/db/client.ts'
 import type { ErrorBody } from './helpers/api-types.ts'
 import { FakeProductSearchAdapter } from './helpers/fake-search-adapter.ts'
+import { TestClock } from './helpers/test-clock.ts'
 import { loadTestConfig } from './helpers/test-config.ts'
 
 /**
@@ -25,13 +26,15 @@ interface SuggestionsBody {
 
 const config = loadTestConfig()
 const search = new FakeProductSearchAdapter()
+// 冷却窗口用假时钟（#24）：本文件不验证冷却，见 test/search-cooldown.test.ts。
+const clock = new TestClock()
 
 let pool: Pool
 let app: AppInstance
 
 before(async () => {
   pool = createPool(config)
-  app = await createApp({ db: createDb(pool), config, search })
+  app = await createApp({ db: createDb(pool), config, search, searchCooldown: { now: clock.now } })
   await app.ready()
 })
 
@@ -156,6 +159,8 @@ test('搜索端口不可用返回 503 与 SEARCH_NOT_AVAILABLE', async () => {
   assert.equal(typeof body.error.message, 'string')
 
   search.reset()
+  // 失败请求开窗 5 s；推进时钟让窗口立即到期，避免影响后续用例（#24）。
+  clock.advance(5_000)
 })
 
 test('参数校验先于搜索可用性判断：两者同时不满足时报 400，且不调用搜索端口', async () => {
