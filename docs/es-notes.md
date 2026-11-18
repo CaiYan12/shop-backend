@@ -216,6 +216,8 @@ private 978.3 MB、`total_virtual_in_bytes` 1,025,716,224 B（≈978 MiB）。
 复现命令：`date -u +START=%FT%TZ; pnpm es:rebuild; date -u +END=%FT%TZ`。
 采集时间：2026-11-18T02:39:53Z–02:43:44Z（Asia/Shanghai 10:39–10:43），ES 9.5.6、16 件商品、单次 bulk 16 条。
 
+- 职责区分：`src/search/index-rebuild.ts` 是重建流程（可注入适配器与选项），`src/search/rebuild-index.ts` 只是 CLI 入口（读配置、装配适配器、打印结果）；两者改名不在本次范围内。
+
 | 阶段 | 第 1 次（建 v1） | 第 2 次（建 v2，删 v1） | 第 3 次（建 v3，删 v2） | 第 4 次（建 v4，内容核对） |
 |---|---:|---:|---:|---:|
 | 读取现有索引与别名 | 32 ms | 27 ms | 24 ms | 23 ms |

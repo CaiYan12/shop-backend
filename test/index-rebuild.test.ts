@@ -100,7 +100,23 @@ test('正常重建按固定顺序执行，_id 用 slug，切换后别名指向�
   ])
 })
 
-test('bulk 返回 200 但逐项失败时中止，且不切换别名', async () => {
+test('可配置物理索引前缀：命名与扫描都在隔离前缀内，默认 products_v 不变', async () => {
+  const indexPrefix = 'products_es_test_rebuild_v'
+  const adapter = new RecordingProductIndexAdapter({ indexPrefix })
+
+  const result = await rebuildProductIndex(adapter, {
+    loadSnapshot: async () => FIXTURE,
+    alias: ALIAS,
+    indexPrefix,
+  })
+
+  assert.equal(result.index, 'products_es_test_rebuild_v1')
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_es_test_rebuild_v1'])
+  assert.equal(adapter.indices.has('products_es_test_rebuild_v1'), true)
+  assert.equal(adapter.indices.has('products_v1'), false, '不得在默认前缀下创建索引')
+})
+
+test('bulk 逐项失败时中止，且不切换别名', async () => {
   const adapter = new RecordingProductIndexAdapter()
   adapter.bulkErrorIds.add('keychron-k8')
 
@@ -173,4 +189,31 @@ test('切换别名后冒烟查询失败时回滚到旧索引', async () => {
 
   assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v1'])
   assert.equal(adapter.indices.has('products_v2'), false)
+})
+
+test('切换别名后失败且回滚失败时，保留别名仍指向的新索引并提示人工检查', async () => {
+  const adapter = new RecordingProductIndexAdapter()
+  await run(adapter)
+  adapter.smokeTotal = 0
+  adapter.aliasUpdateFailure = ({ add, remove }) =>
+    add.includes('products_v1') && remove.includes('products_v2')
+      ? new Error('模拟的回滚失败')
+      : undefined
+
+  await assert.rejects(run(adapter), (error: unknown) => {
+    assert.ok(error instanceof IndexRebuildError)
+    assert.match(error.message, /冒烟查询没有命中/)
+    assert.match(error.message, /别名回滚失败/)
+    assert.match(error.message, /请人工检查别名/)
+    assert.match(error.message, /仍被别名 .* 引用，已保留/)
+    return true
+  })
+
+  assert.equal(
+    adapter.steps.some((step) => step.name === 'deleteIndex' && step.index === 'products_v2'),
+    false,
+    '别名仍指向新索引时不得删除它',
+  )
+  assert.deepEqual([...(adapter.aliases.get(ALIAS) ?? [])], ['products_v2'])
+  assert.equal(adapter.indices.has('products_v2'), true, '新索引必须保留，供人工处理')
 })

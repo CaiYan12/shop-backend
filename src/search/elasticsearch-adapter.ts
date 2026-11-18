@@ -38,6 +38,14 @@ export interface ElasticsearchClientOptions {
   maxRetries?: number
 }
 
+export interface ElasticsearchProductIndexAdapterOptions {
+  /**
+   * 物理索引前缀；默认 `products_v`（ADR 0003）。
+   * 测试传入隔离前缀（如 `products_es_test_rebuild_v`）即可跑完整重建而不触碰演示索引。
+   */
+  indexPrefix?: string
+}
+
 /** 重建专用客户端：显式超时、禁用自动重试。 */
 export function createElasticsearchClient (options: ElasticsearchClientOptions): Client {
   return new Client({
@@ -69,20 +77,23 @@ interface BulkItemPayload {
 /** 官方客户端适配器：查询、写入与别名操作都走同一端口。 */
 export class ElasticsearchProductIndexAdapter implements ProductIndexAdapter {
   private readonly client: Client
+  private readonly indexPrefix: string
 
   // Node 的 strip-only TypeScript 不支持构造函数参数字段，这里显式声明并赋值。
-  constructor (client: Client) {
+  constructor (client: Client, options: ElasticsearchProductIndexAdapterOptions = {}) {
     this.client = client
+    this.indexPrefix = options.indexPrefix ?? PRODUCT_INDEX_PREFIX
   }
 
   async listProductIndices (): Promise<string[]> {
     try {
       const response = await this.client.indices.get({
-        index: `${PRODUCT_INDEX_PREFIX}*`,
+        index: `${this.indexPrefix}*`,
         allow_no_indices: true,
         expand_wildcards: 'open',
       })
-      return Object.keys(response).filter((name) => productIndexVersion(name) !== null)
+      return Object.keys(response)
+        .filter((name) => productIndexVersion(name, this.indexPrefix) !== null)
     } catch (error) {
       if (isNotFound(error)) return []
       throw error
@@ -115,7 +126,6 @@ export class ElasticsearchProductIndexAdapter implements ProductIndexAdapter {
     ])
     const response = await this.client.bulk({ operations: body })
     return {
-      status: 200,
       errors: response.errors,
       items: response.items.map((item) => {
         const actionName = Object.keys(item)[0] ?? ''

@@ -102,15 +102,22 @@ test('q 缺失、trim 后为空、trim 后超过 100 字符都返回 400，明�
   assert.equal(search.suggestionQueries.length, 0, '参数校验失败的请求不应调用搜索端口')
 })
 
-test('limit 必须是 1–10 的整数：越界与非整数返回 400，明细指向 querystring/limit', async () => {
+test('limit 必须是 1–10 的整数：越界与非数字返回 400，小数字面量按 Convert 截断', async () => {
   search.reset()
-  for (const limit of [0, 11, -1, 2.5, 'abc']) {
+  for (const limit of [0, 11, -1, 'abc']) {
     const { status, body } = await suggest({ q: 'AirPods', limit })
     assert.equal(status, 400, `limit=${String(limit)} 应返回 400`)
     assert.equal(body.error.code, 'VALIDATION_FAILED')
     assert.equal(body.error.details?.[0]?.path, 'querystring/limit', `limit=${String(limit)} 的明细应指向 limit`)
   }
   assert.equal(search.suggestionQueries.length, 0, '参数校验失败的请求不应调用搜索端口')
+
+  // A 方案：limit 与 page / pageSize 一样经 Value.Convert，"2.5" 截断为 2 后通过校验。
+  const { status } = await suggest({ q: 'AirPods', limit: 2.5 })
+  assert.equal(status, 200, 'limit=2.5 应经 Convert 截断为 2 后通过')
+  const converted = search.suggestionQueries.at(-1)
+  assert.ok(converted !== undefined)
+  assert.equal(converted.limit, 2, '端口应收到截断后的 limit')
 })
 
 interface SuggestionHighlight {

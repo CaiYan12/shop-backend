@@ -55,8 +55,8 @@ export async function resetIsolatedProductIndex (
     index,
     documents.map((document) => ({ id: document.slug, document })),
   )
-  if (bulk.status < 200 || bulk.status >= 300 || bulk.errors) {
-    throw new Error(`测试索引 bulk 导入失败：status=${bulk.status} errors=${String(bulk.errors)}。`)
+  if (bulk.errors) {
+    throw new Error(`测试索引 bulk 导入失败：errors=${String(bulk.errors)}。`)
   }
   await indexAdapter.refresh(index)
   const count = await indexAdapter.count(index)

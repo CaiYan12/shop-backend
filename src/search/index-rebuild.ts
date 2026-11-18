@@ -1,4 +1,5 @@
 import {
+  PRODUCT_INDEX_PREFIX,
   PRODUCTS_ALIAS,
   productIndexName,
   productIndexVersion,
@@ -18,8 +19,6 @@ export interface BulkItemOutcome {
 }
 
 export interface BulkOutcome {
-  /** HTTP 状态码；只有 2xx 才继续。 */
-  status: number
   errors: boolean
   items: BulkItemOutcome[]
 }
@@ -46,6 +45,11 @@ export interface RebuildProductIndexOptions {
   loadSnapshot: () => Promise<ProductSearchDocument[]>
   /** 别名；默认 products。 */
   alias?: string
+  /**
+   * 物理索引前缀；默认 `products_v`（ADR 0003）。
+   * 测试传入隔离前缀即可跑完整重建，默认值保持不变。
+   */
+  indexPrefix?: string
   /** 进度输出；默认静默。 */
   log?: (line: string) => void
 }
@@ -80,12 +84,8 @@ function describeError (error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** bulk 返回 HTTP 200 也可能带 errors；逐项检查后才算成功（ADR 0003）。 */
+/** bulk 即使在 HTTP 200 下也可能带 errors；逐项检查后才算成功（ADR 0003）。 */
 function assertBulkSucceeded (bulk: BulkOutcome, expectedCount: number): void {
-  if (bulk.status < 200 || bulk.status >= 300) {
-    throw new IndexRebuildError(`bulk 返回 HTTP ${bulk.status}，没有继续。`)
-  }
-
   const failed = bulk.items.filter(
     (item) => item.status < 200 || item.status >= 300 || item.error !== undefined,
   )
@@ -119,6 +119,7 @@ export async function rebuildProductIndex (
   options: RebuildProductIndexOptions,
 ): Promise<RebuildProductIndexResult> {
   const alias = options.alias ?? PRODUCTS_ALIAS
+  const indexPrefix = options.indexPrefix ?? PRODUCT_INDEX_PREFIX
   const log = options.log ?? (() => {})
   const timings: RebuildStageTiming[] = []
   const startedAt = performance.now()
@@ -142,10 +143,10 @@ export async function rebuildProductIndex (
 
   const previousIndices = [...new Set(current)]
   const versions = [...existing, ...current]
-    .map((index) => productIndexVersion(index))
+    .map((index) => productIndexVersion(index, indexPrefix))
     .filter((version): version is number => version !== null)
   const nextVersion = versions.length === 0 ? 1 : Math.max(...versions) + 1
-  const indexName = productIndexName(nextVersion)
+  const indexName = productIndexName(nextVersion, indexPrefix)
   log(
     `[es:rebuild] 目标别名 ${alias}，新物理索引 ${indexName}` +
       `（旧索引：${previousIndices.length === 0 ? '无' : previousIndices.join('、')}）`,
@@ -252,12 +253,31 @@ export async function rebuildProductIndex (
       }
     }
 
+    // 回滚失败时别名可能仍指向新索引：先核对别名，确认已不含新索引才删除。
+    // 否则删掉新索引会把别名指向不存在的索引，违背「重建失败时旧索引继续服务」。
+    let aliasTargets: string[] | undefined
+    if (aliasSwitched) {
+      try {
+        aliasTargets = await adapter.aliasIndices(alias)
+      } catch (checkError) {
+        rollbackNote += `；核对别名状态失败（${describeError(checkError)}）`
+      }
+    }
+    const newIndexStillReferenced = aliasSwitched &&
+      (aliasTargets === undefined || aliasTargets.includes(indexName))
+
     let cleanupNote = ''
-    try {
-      await adapter.deleteIndex(indexName)
-      cleanupNote = '；新索引已清理'
-    } catch (cleanupError) {
-      cleanupNote = `；新索引 ${indexName} 清理失败：${describeError(cleanupError)}`
+    if (newIndexStillReferenced) {
+      cleanupNote = aliasTargets === undefined
+        ? `；别名状态无法确认，新索引 ${indexName} 已保留`
+        : `；新索引 ${indexName} 仍被别名 ${alias} 引用，已保留`
+    } else {
+      try {
+        await adapter.deleteIndex(indexName)
+        cleanupNote = '；新索引已清理'
+      } catch (cleanupError) {
+        cleanupNote = `；新索引 ${indexName} 清理失败：${describeError(cleanupError)}`
+      }
     }
 
     const prefix = aliasSwitched ? '索引重建失败' : '索引重建失败，未切换别名'

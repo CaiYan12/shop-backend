@@ -66,11 +66,13 @@ async function trimKeyword (request: FastifyRequest): Promise<void> {
 
 /**
  * 商品联想先 trim 再校验（#22）：空白 q 按非法参数处理，长度校验作用在 trim 之后。
+ * limit 不做原始字符串校验：整个 API 的整数参数都沿用 Value.Convert 的既有行为
+ * （"2.5" 截断为 2 后通过范围校验），与 page / pageSize 一致（见 docs/typebox-notes.md）。
  * 缺参时框架校验的 instancePath 为空、明细只会落到 `querystring`，
  * 这里补一条指向具体参数的明细，满足「details 指向对应参数」。
  */
 async function normalizeSuggestionQuery (request: FastifyRequest): Promise<void> {
-  const query = request.query as { q?: unknown, limit?: unknown }
+  const query = request.query as { q?: unknown }
   if (query.q === undefined) {
     throw new AppError('VALIDATION_FAILED', '缺少查询参数 q。', [
       { path: 'querystring/q', message: '必须提供 q。' },
@@ -78,13 +80,6 @@ async function normalizeSuggestionQuery (request: FastifyRequest): Promise<void>
   }
   if (typeof query.q === 'string') {
     query.q = query.q.trim()
-  }
-  // TypeBox 的 Convert 会把 "2.5" 截断成 2 再通过整数校验（见 docs/typebox-notes.md），
-  // 因此按原始字符串拒绝非整数字面量，保证 limit 的契约确实是整数。
-  if (typeof query.limit === 'string' && !/^[0-9]+$/.test(query.limit)) {
-    throw new AppError('VALIDATION_FAILED', 'limit 必须是 1–10 的整数。', [
-      { path: 'querystring/limit', message: 'limit 必须是 1–10 的整数。' },
-    ])
   }
 }
 
@@ -132,16 +127,13 @@ function toListItem (
 type ListProductsQueryType = Static<typeof ListProductsQuery>
 
 /**
- * 调用搜索端口（#21、C37）：只传结构化条件，路由不感知查询 DSL。
- * 端口把「连不上 / 超时 / 索引未就绪」封装成 SearchUnavailableError，这里映射为 503；
+ * 调用搜索端口（#21、#22、C37）：把「连不上 / 超时 / 索引未就绪」映射为 503；
  * 其它异常保持 500，避免把程序错误伪装成「稍后重试」。
+ * 关键词搜索与商品联想共用这一份错误映射，方法差异只通过回调表达。
  */
-async function searchProductHits (
-  app: AppInstance,
-  query: ProductSearchQuery,
-): Promise<ProductSearchResult> {
+async function callSearchPort<T> (task: () => Promise<T>): Promise<T> {
   try {
-    return await app.productSearch.search(query)
+    return await task()
   } catch (error) {
     if (error instanceof SearchUnavailableError) {
       throw new AppError('SEARCH_NOT_AVAILABLE', '搜索服务暂时不可用，请稍后重试。')
@@ -150,22 +142,23 @@ async function searchProductHits (
   }
 }
 
+/** 关键词搜索（#21）：只传结构化条件，路由不感知查询 DSL。 */
+function searchProductHits (
+  app: AppInstance,
+  query: ProductSearchQuery,
+): Promise<ProductSearchResult> {
+  return callSearchPort(() => app.productSearch.search(query))
+}
+
 /**
  * 商品联想（#22）：与关键词搜索共用同一个端口与同一套降级语义。
  * 路由只把端口结果转成响应，不感知查询 DSL，也不直接持有适配器。
  */
-async function suggestProductHits (
+function suggestProductHits (
   app: AppInstance,
   query: ProductSuggestionQuery,
 ): Promise<ProductSuggestionResult> {
-  try {
-    return await app.productSearch.suggest(query)
-  } catch (error) {
-    if (error instanceof SearchUnavailableError) {
-      throw new AppError('SEARCH_NOT_AVAILABLE', '搜索服务暂时不可用，请稍后重试。')
-    }
-    throw error
-  }
+  return callSearchPort(() => app.productSearch.suggest(query))
 }
 
 /**

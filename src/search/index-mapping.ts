@@ -55,17 +55,27 @@ export const PRODUCT_INDEX_DEFINITION: ProductIndexDefinition = {
   },
 }
 
-/** 由版本号生成物理索引名；版本从 1 开始。 */
-export function productIndexName (version: number): string {
+/**
+ * 由版本号生成物理索引名；版本从 1 开始。
+ * 前缀默认 `products_v`；测试传入隔离前缀时，整条重建链路共用同一个值。
+ */
+export function productIndexName (version: number, prefix: string = PRODUCT_INDEX_PREFIX): string {
   if (!Number.isInteger(version) || version < 1) {
     throw new Error('物理索引版本必须是正整数。')
   }
-  return `${PRODUCT_INDEX_PREFIX}${version}`
+  return `${prefix}${version}`
 }
 
-/** 从物理索引名解析版本；不是 products_vN 形状时返回 null。 */
-export function productIndexVersion (index: string): number | null {
-  const match = new RegExp(`^${PRODUCT_INDEX_PREFIX}(\\d+)$`).exec(index)
+/**
+ * 从物理索引名解析版本；不是 `<prefix>N` 形状时返回 null。
+ * 前缀里的正则元字符会被转义，因此测试前缀可以带下划线等普通字符而不必改调用方。
+ */
+export function productIndexVersion (
+  index: string,
+  prefix: string = PRODUCT_INDEX_PREFIX,
+): number | null {
+  const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = new RegExp(`^${escapedPrefix}(\\d+)$`).exec(index)
   if (match === null) return null
   const version = Number(match[1])
   return Number.isInteger(version) && version >= 1 ? version : null

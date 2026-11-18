@@ -31,3 +31,9 @@ test('物理索引名与版本号互转', () => {
   assert.equal(productIndexVersion('products_vx'), null)
   assert.throws(() => productIndexName(0), /版本必须是正整数/)
 })
+
+test('物理索引前缀可配置：默认 products_v 不变，自定义前缀用于隔离重建', () => {
+  assert.equal(productIndexName(3, 'products_es_test_rebuild_v'), 'products_es_test_rebuild_v3')
+  assert.equal(productIndexVersion('products_es_test_rebuild_v3', 'products_es_test_rebuild_v'), 3)
+  assert.equal(productIndexVersion('products_es_test_rebuild_v3'), null)
+})
