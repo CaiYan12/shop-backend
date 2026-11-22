@@ -116,3 +116,19 @@ jobs:
           curl -fsS "http://127.0.0.1:9201/_cat/plugins" | tee /tmp/es-plugins.txt
           grep -q 'analysis-smartcn' /tmp/es-plugins.txt || { echo "缺少 analysis-smartcn 插件"; exit 1; }
       - run: pnpm test:es
+  # 独立轻量回归：假启动器 + 测试端口，无需 MySQL / 真实 ES。
+  es-lifecycle:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:es-lifecycle

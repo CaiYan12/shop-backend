@@ -15,7 +15,8 @@ import { spawnSync } from 'node:child_process'
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isOwnedByLaunch, sameProcessIdentity } from './es-ownership.mjs'
+import { isOwnedByLaunch } from './es-ownership.mjs'
+import { terminateLauncher } from './es-launcher.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const runDir = join(root, '.run')
@@ -213,19 +214,13 @@ function killTree (pid, label) {
  * cmd 42916 + powershell 52536）。外部监听进程不属于本轮，绝不在此连带终止。
  */
 function killLauncher (launcherPid) {
-  if (launcherIdentity === null) {
-    console.error('[es] 无法读取启动器 ' + launcherPid + ' 的启动时间与可执行路径，不终止任何进程')
-    return false
-  }
-  const actual = processInfo(launcherPid)
-  if (!sameProcessIdentity(launcherIdentity, actual)) {
-    console.error('[es] 启动器归属校验失败：PID ' + launcherPid + ' 的启动时间或可执行路径与本次记录不符')
-    console.error('[es]   记录 ' + JSON.stringify(launcherIdentity) + '，实际 ' + JSON.stringify(actual))
-    console.error('[es] 为避免 PID 复用误杀，本次不终止任何进程')
-    return false
-  }
-  killTree(launcherPid, '本次启动的启动器进程树')
-  return true
+  const result = terminateLauncher({
+    launcherPid,
+    identity: launcherIdentity,
+    actual: processInfo(launcherPid),
+    kill: (pid) => killTree(pid, '本次启动的启动器进程树'),
+  })
+  return result.killed
 }
 
 const PROVENANCE_SCHEMA = 'es-provenance/v1'

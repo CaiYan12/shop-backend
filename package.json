@@ -11,6 +11,7 @@
     "type-check": "tsc -p tsconfig.json",
     "test": "node --test --test-concurrency=1 --test-global-setup=test/global-setup.ts \"test/**/*.test.ts\"",
     "test:es": "node --test --test-concurrency=1 --test-global-setup=test-es/global-setup.ts \"test-es/**/*.test.ts\"",
+    "test:es-lifecycle": "node --test --test-concurrency=1 \"test-es-lifecycle/**/*.test.mjs\"",
     "db:create": "node src/db/create-db.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",

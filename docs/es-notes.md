@@ -767,3 +767,19 @@ BM25 的名称长度差异会决定同品牌商品的先后，下表同时列出
 - 固有原因：ES 别名 API 没有条件更新 / 比较并交换，`_aliases` 是一组独立 add/remove，不校验旧集合也没有版本号；本机端口互斥无法约束其它机器。
 - 端口互斥只覆盖同一台机器的同一端口；两台机器各自默认 19201 仍可并发。
 - 身份记录只是诊断，不提供额外互斥。
+
+## 7. 启动器生命周期回归（Windows CI）
+
+`test-es-lifecycle/es-dev-lifecycle.test.mjs` 用假 `ES_HOME/bin/elasticsearch.bat` 覆盖三条实际进程链：
+
+1. 启动后 3s 未就绪：exit 1、启动器进程树消失、端口空闲、provenance `created:false` / `failed:true`。
+2. 假启动器拉起后由测试在目标端口启动外部 listener：命中「监听者非本次归属」，只终止本次启动器，外部 listener 继续响应。
+3. 真实进程身份与记录不符：`terminateLauncher` 返回 `identity-mismatch`，不调用 taskkill；身份一致后才终止。
+
+该套件不依赖 MySQL / 真实 Elasticsearch，独立 job `es-lifecycle` 跑在 `windows-latest`：
+
+```bash
+pnpm test:es-lifecycle
+```
+
+每个用例使用独立临时目录与测试端口，失败时 `finally` 仍会 kill 本用例创建的进程树。
