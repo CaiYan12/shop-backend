@@ -13,6 +13,25 @@
 export const DEFAULT_MAX_DEPTH = 16
 
 /** Windows 路径统一大小写与分隔符后再比较。 */
+function samePath (left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false
+  return normalizePath(left) === normalizePath(right)
+}
+
+/**
+ * 判定两次进程记录是否仍是同一个进程：PID、启动时间、可执行路径三项都必须一致。
+ * PID 会被系统复用，只按 PID 终止可能误杀；调用方应在 taskkill 前用它复核。
+ */
+export function sameProcessIdentity (recorded, actual) {
+  if (!recorded || !actual) return false
+  const actualPid = Number.isInteger(actual.pid) ? actual.pid : actual.id
+  if (!Number.isInteger(recorded.pid) || recorded.pid !== actualPid) return false
+  if (typeof recorded.startTime !== 'string' || recorded.startTime === '') return false
+  if (recorded.startTime !== actual.startTime) return false
+  return samePath(recorded.execPath, actual.execPath)
+}
+
+/** Windows 路径统一大小写与分隔符后再比较。 */
 function normalizePath (value) {
   return String(value).replace(/\//g, '\\').toLowerCase().replace(/\\+$/, '')
 }

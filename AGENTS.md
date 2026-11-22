@@ -42,6 +42,7 @@ pnpm db:migrate     # 应用迁移（重复执行为 no-op）
 pnpm db:seed        # 导入种子数据（按稳定键 upsert，可重复执行）
 pnpm verify:images  # 校验种子引用的图片存在且归属正确
 pnpm es:rebuild     # 全量重建商品索引并切换 products 别名（需 MySQL 与 Elasticsearch 在线）
+pnpm lint           # Oxlint correctness 基线（check-only）
 ```
 
 启停（Windows）：

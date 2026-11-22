@@ -27,7 +27,7 @@ test('快照覆盖 MySQL 全量 16 件商品，展示价与既有派生规则一
   assert.equal(new Set(documents.map((document) => document.slug)).size, 16)
   assert.deepEqual(
     documents.map((document) => document.productId),
-    [...documents.map((document) => document.productId)].sort((left, right) => left - right),
+    documents.map((document) => document.productId).sort((left, right) => left - right),
   )
 
   const summaries = await selectProductSummaries(db)

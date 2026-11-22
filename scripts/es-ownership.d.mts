@@ -9,7 +9,25 @@ export type ProcessLookup = (pid: number) => ProcessRecord | null | undefined
 
 export type ProcessRelation = 'self' | 'descendant' | null
 
+export interface ProcessIdentity {
+  pid: number
+  startTime: string
+  execPath: string
+}
+
+export interface ProcessIdentityObservation {
+  pid?: number
+  id?: number
+  startTime?: string | null
+  execPath?: string | null
+}
+
 export declare const DEFAULT_MAX_DEPTH: number
+
+export declare function sameProcessIdentity(
+  recorded: ProcessIdentity,
+  actual: ProcessIdentityObservation | null | undefined,
+): boolean
 
 export declare function traceToLauncher(
   listenerPid: number,
