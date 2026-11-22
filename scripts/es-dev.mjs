@@ -204,6 +204,18 @@ function killTree (pid, label) {
   spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
 }
 
+/**
+ * 收尾本次 Start-Process 返回的启动器。
+ *
+ * 启动器（cmd.exe）是本次拉起的，属本轮清理范围：服务 JVM 由它派生，只按监听端口
+ * 终止会漏掉「监听者尚未出现」「监听者无法确认」「端口被外部进程占用」三种情况，
+ * 留下 cmd / powershell 中间进程（#32 复审实测：listenerPid 为 null 时残留
+ * cmd 42916 + powershell 52536）。外部监听进程不属于本轮，绝不在此连带终止。
+ */
+function killLauncher (launcherPid) {
+  killTree(launcherPid, '本次启动的启动器进程树')
+}
+
 const PROVENANCE_SCHEMA = 'es-provenance/v1'
 
 /**
@@ -355,16 +367,20 @@ if (!ready) {
   const readyTimeoutReason = '等待 Elasticsearch 就绪超时（' + Math.round(CONFIG.readyTimeoutMs / 1000) + 's）'
   reportTimeout(readyTimeoutReason)
   if (listenerPid === null) {
-    console.error('[es] 没有发现监听 ' + CONFIG.httpPort + ' 的进程，本次没有可终止的进程')
+    console.error('[es] 没有发现监听 ' + CONFIG.httpPort + ' 的进程，只收尾本次启动器')
   } else {
     const ownership = ownershipOf(listenerPid, launcherPid)
     if (ownership.owned) {
+      // 监听者已出现且归属成立：先杀监听进程，再连带收尾启动器。
       killTree(listenerPid, '本次启动的监听进程')
     } else {
       console.error('[es] 端口 ' + CONFIG.httpPort + ' 被外部进程 ' + listenerPid + ' 占用，本次不终止')
       console.error('[es] ' + ownership.reason)
     }
   }
+  // 无论监听者是否出现，本次拉起的启动器进程树都要收尾：否则半启动的 cmd /
+  // powershell 会一直留在系统里（#32 复审实测复现）。外部监听者不属本轮，不连带终止。
+  killLauncher(launcherPid)
   failExit(readyTimeoutReason, listenerPid)
 }
 
@@ -373,12 +389,16 @@ if (listenerPid === null) listenerPid = pidOnPort(CONFIG.httpPort)
 if (listenerPid === null) {
   console.error('[es] 已就绪但无法确定监听 ' + CONFIG.httpPort + ' 的进程，归属无法证明')
   console.error('[es] 本次不写运行记录，也不宣称启动成功')
+  // 监听者无法确认，但启动器仍是本轮拉起的，必须收尾，避免留下未登记的进程树。
+  killLauncher(launcherPid)
   failExit('已就绪但无法确定监听 ' + CONFIG.httpPort + ' 的进程，归属无法证明')
 }
 const ownership = ownershipOf(listenerPid, launcherPid)
 if (!ownership.owned) {
   console.error('[es] 端口 ' + CONFIG.httpPort + ' 被外部进程 ' + listenerPid + ' 占用，本次不写运行记录')
   console.error('[es] ' + ownership.reason)
+  // 只收尾本次启动器：外部监听者不属本轮，绝不连带终止。
+  killLauncher(launcherPid)
   failExit('端口 ' + CONFIG.httpPort + ' 被外部进程 ' + listenerPid + ' 占用，本次不写运行记录', listenerPid)
 }
 
