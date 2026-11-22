@@ -1,6 +1,6 @@
 name: CI
 
-# 第一步：跑现有门禁（type-check / check:terms / test / build）。
+# 第一步：跑现有门禁（type-check / check:terms / lint / test / build）。
 # 第二步（后续）：再加真实 ES 作业，核验 9.5.6 + analysis-smartcn + 就绪探测 + 测试库隔离。
 on:
   push:
@@ -45,6 +45,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm type-check
       - run: pnpm check:terms
+      - run: pnpm lint
       # 默认套件不依赖 Elasticsearch（global-setup 只建测试库），ES_URL 指向未监听端口即可。
       - run: pnpm test
       - run: pnpm build
